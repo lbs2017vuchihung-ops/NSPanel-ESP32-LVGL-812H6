@@ -47,12 +47,14 @@ namespace
     std::atomic<bool> g_publishPending{false}; // app -> net: publish MQTT state
     std::atomic<uint32_t> g_minFreeHeap{UINT32_MAX};
     uint32_t g_bootTime = 0;
+    float g_currentTemp = 0.0; 
+    float g_currentHum = 0.0;
 
     storage::Config g_sdConfig; // /config.json, read once in setup()
-    char g_mqttHost[64] = MQTT_BROKER;
-    uint16_t g_mqttPort = MQTT_PORT;
-    char g_mqttUser[32] = MQTT_USER;
-    char g_mqttPass[64] = MQTT_PASSWORD;
+    char g_mqttHost[64] = "app.coreiot.io";
+    uint16_t g_mqttPort = 1883;
+    char g_mqttUser[32] = "IxeF1gv7u8t2AOLQvoZP";
+    char g_mqttPass[64] = "";
 
     // ===================== messages =====================
 
@@ -118,6 +120,8 @@ namespace
 
     void pushSensors(const SensorValues &s, hmi::SensorState state)
     {
+        g_currentTemp = s.primary; // Lấy nhiệt độ
+        g_currentHum = s.metric1;   // Lấy độ ẩm
         hmi::setPrimary(s.primary, s.primaryError ? hmi::SensorState::Error : state);
         hmi::setMetric(0, s.metric1, state);
         hmi::setMetric(1, s.metric2, state);
@@ -229,7 +233,7 @@ namespace
             return;
 
         AppMsg m{};
-        if (strcmp(topic, MQTT_TOPIC_SENSOR) == 0)
+        if (strcmp(topic, "v1/devices/me/telemetry") == 0)
         {
             // {"primary":26.4,"metric1":62,"metric2":412}  or  {"error":true}
             m.cmd = AppCmd::Sensors;
@@ -240,14 +244,34 @@ namespace
             postApp(m);
             return;
         }
-        if (strcmp(topic, MQTT_TOPIC_COMMAND) != 0)
+        if (strncmp(topic, "v1/devices/me/rpc/request/", 26) != 0)
             return;
-        if (doc["relay"].is<int>())
-        {
-            m.cmd = AppCmd::RelaySet;
-            m.index = doc["relay"].as<int>();
-            m.flag = doc["state"] | false;
-            postApp(m);
+        // Kiểm tra xem JSON có chứa trường "method" không
+        if (doc["method"].is<const char*>()) {
+            const char* method = doc["method"];
+            bool state = doc["params"] | false; // Lấy trạng thái On/Off
+
+            if (strcmp(method, "setLight") == 0) {
+             // Giả sử Đèn được đấu vào Relay 0
+                m.cmd = AppCmd::RelaySet;
+                m.index = 0; 
+                m.flag = state;
+                postApp(m);
+                Serial.printf("Received setLight: %d\n", state);
+            }
+            else if (strcmp(method, "setAC1") == 0) {
+                // Gửi lệnh điều khiển máy lạnh 1 qua ESP-NOW
+                espnowSendAcCommand(1, state, 25); // ID 1, trạng thái, nhiệt độ mặc định 25
+                Serial.printf("Received setAC1: %d\n", state);
+            }
+            else if (strcmp(method, "setAC2") == 0) {
+                espnowSendAcCommand(2, state, 25);
+                Serial.printf("Received setAC2: %d\n", state);
+            }
+            else if (strcmp(method, "setAC3") == 0) {
+                espnowSendAcCommand(3, state, 25);
+                Serial.printf("Received setAC3: %d\n", state);
+            }
         }
         else if (doc["relays"].is<JsonArray>())
         {
@@ -276,8 +300,10 @@ namespace
         doc["uptime"] = (millis() - g_bootTime) / 1000;
         doc["free_heap"] = ESP.getFreeHeap();
         doc["min_free_heap"] = g_minFreeHeap.load();
-        doc["wifi_rssi"] = WiFi.RSSI();
+        doc["wifi_rssi"] = WiFi.RSSI(); 
         doc["ip"] = WiFi.localIP().toString();
+        doc["temperature"] = g_currentTemp; // Đẩy nhiệt độ vào JSON
+        doc["humidity"] = g_currentHum;     // Đẩy độ ẩm vào JSON
         JsonArray relays = doc["relays"].to<JsonArray>();
         for (int i = 0; i < RELAY_COUNT; i++)
         {
@@ -288,7 +314,7 @@ namespace
         }
         String out;
         serializeJson(doc, out);
-        g_mqtt.publish(MQTT_TOPIC_STATE, out.c_str(), true);
+        g_mqtt.publish("v1/devices/me/telemetry", out.c_str(), true);
     }
 
     void setupOTA()
@@ -314,13 +340,11 @@ namespace
         lastTry = now;
         String id = String(MQTT_CLIENT_ID) + "-" + String(random(0xffff), HEX);
         if (g_mqtt.connect(id.c_str(), g_mqttUser[0] ? g_mqttUser : nullptr, g_mqttPass[0] ? g_mqttPass : nullptr,
-                           MQTT_TOPIC_AVAILABILITY, 1, true, "offline"))
+                   "v1/devices/me/telemetry", 1, true, "{\"status\":\"offline\"}"))
         {
             storage::logEvent("MQTT connected to %s:%u", g_mqttHost, g_mqttPort);
-            g_mqtt.subscribe(MQTT_TOPIC_COMMAND);
-            g_mqtt.subscribe(MQTT_TOPIC_CONFIG);
-            g_mqtt.subscribe(MQTT_TOPIC_SENSOR);
-            g_mqtt.publish(MQTT_TOPIC_AVAILABILITY, "online", true);
+            g_mqtt.subscribe("v1/devices/me/rpc/request/+");
+            g_mqtt.publish("v1/devices/me/telemetry", "{\"status\":\"online\"}", true);
             publishState();
             retryDelay = MQTT_RECONNECT_INTERVAL;
         }
