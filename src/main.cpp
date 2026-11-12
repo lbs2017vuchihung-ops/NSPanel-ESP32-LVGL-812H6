@@ -47,7 +47,7 @@ namespace
     std::atomic<bool> g_publishPending{false}; // app -> net: publish MQTT state
     std::atomic<uint32_t> g_minFreeHeap{UINT32_MAX};
     uint32_t g_bootTime = 0;
-    float g_currentTemp = 0.0; 
+    float g_currentTemp = 0.0;
     float g_currentHum = 0.0;
 
     storage::Config g_sdConfig; // /config.json, read once in setup()
@@ -121,7 +121,7 @@ namespace
     void pushSensors(const SensorValues &s, hmi::SensorState state)
     {
         g_currentTemp = s.primary; // Lấy nhiệt độ
-        g_currentHum = s.metric1;   // Lấy độ ẩm
+        g_currentHum = s.metric1;  // Lấy độ ẩm
         hmi::setPrimary(s.primary, s.primaryError ? hmi::SensorState::Error : state);
         hmi::setMetric(0, s.metric1, state);
         hmi::setMetric(1, s.metric2, state);
@@ -247,28 +247,33 @@ namespace
         if (strncmp(topic, "v1/devices/me/rpc/request/", 26) != 0)
             return;
         // Kiểm tra xem JSON có chứa trường "method" không
-        if (doc["method"].is<const char*>()) {
-            const char* method = doc["method"];
+        if (doc["method"].is<const char *>())
+        {
+            const char *method = doc["method"];
             bool state = doc["params"] | false; // Lấy trạng thái On/Off
 
-            if (strcmp(method, "setLight") == 0) {
-             // Giả sử Đèn được đấu vào Relay 0
+            if (strcmp(method, "setLight") == 0)
+            {
+                // Giả sử Đèn được đấu vào Relay 0
                 m.cmd = AppCmd::RelaySet;
-                m.index = 0; 
+                m.index = 0;
                 m.flag = state;
                 postApp(m);
                 Serial.printf("Received setLight: %d\n", state);
             }
-            else if (strcmp(method, "setAC1") == 0) {
+            else if (strcmp(method, "setAC1") == 0)
+            {
                 // Gửi lệnh điều khiển máy lạnh 1 qua ESP-NOW
                 espnowSendAcCommand(1, state, 25); // ID 1, trạng thái, nhiệt độ mặc định 25
                 Serial.printf("Received setAC1: %d\n", state);
             }
-            else if (strcmp(method, "setAC2") == 0) {
+            else if (strcmp(method, "setAC2") == 0)
+            {
                 espnowSendAcCommand(2, state, 25);
                 Serial.printf("Received setAC2: %d\n", state);
             }
-            else if (strcmp(method, "setAC3") == 0) {
+            else if (strcmp(method, "setAC3") == 0)
+            {
                 espnowSendAcCommand(3, state, 25);
                 Serial.printf("Received setAC3: %d\n", state);
             }
@@ -300,7 +305,7 @@ namespace
         doc["uptime"] = (millis() - g_bootTime) / 1000;
         doc["free_heap"] = ESP.getFreeHeap();
         doc["min_free_heap"] = g_minFreeHeap.load();
-        doc["wifi_rssi"] = WiFi.RSSI(); 
+        doc["wifi_rssi"] = WiFi.RSSI();
         doc["ip"] = WiFi.localIP().toString();
         doc["temperature"] = g_currentTemp; // Đẩy nhiệt độ vào JSON
         doc["humidity"] = g_currentHum;     // Đẩy độ ẩm vào JSON
@@ -340,7 +345,7 @@ namespace
         lastTry = now;
         String id = String(MQTT_CLIENT_ID) + "-" + String(random(0xffff), HEX);
         if (g_mqtt.connect(id.c_str(), g_mqttUser[0] ? g_mqttUser : nullptr, g_mqttPass[0] ? g_mqttPass : nullptr,
-                   "v1/devices/me/telemetry", 1, true, "{\"status\":\"offline\"}"))
+                           "v1/devices/me/telemetry", 1, true, "{\"status\":\"offline\"}"))
         {
             storage::logEvent("MQTT connected to %s:%u", g_mqttHost, g_mqttPort);
             g_mqtt.subscribe("v1/devices/me/rpc/request/+");
@@ -698,30 +703,32 @@ namespace
     // Tasmota devices: /config.json "tasmota" if present, else config.h.
     uint8_t deviceList(hmi::DeviceInfo *out)
     {
-        if (g_sdConfig.tasmotaCount)
-        {
-            memcpy(out, g_sdConfig.tasmota, sizeof(hmi::DeviceInfo) * g_sdConfig.tasmotaCount);
-            return g_sdConfig.tasmotaCount;
-        }
-        const struct
-        {
-            const char *name;
-            const char *key;
-            uint8_t channels;
-        } defaults[] = {
-            {TASMOTA_1_NAME, TASMOTA_1_KEY, TASMOTA_1_CHANNELS},
-            {TASMOTA_2_NAME, TASMOTA_2_KEY, TASMOTA_2_CHANNELS},
-        };
-        uint8_t n = 0;
-        for (const auto &d : defaults)
-        {
-            out[n] = hmi::DeviceInfo{};
-            strlcpy(out[n].name, d.name, sizeof(out[n].name));
-            strlcpy(out[n].key, d.key, sizeof(out[n].key));
-            out[n].channels = d.channels;
-            n++;
-        }
-        return n;
+        // if (g_sdConfig.tasmotaCount)
+        // {
+        //     memcpy(out, g_sdConfig.tasmota, sizeof(hmi::DeviceInfo) * g_sdConfig.tasmotaCount);
+        //     return g_sdConfig.tasmotaCount;
+        // }
+        // const struct
+        // {
+        //     const char *name;
+        //     const char *key;
+        //     uint8_t channels;
+        // } defaults[] = {
+        //     {TASMOTA_1_NAME, TASMOTA_1_KEY, TASMOTA_1_CHANNELS},
+        //     {TASMOTA_2_NAME, TASMOTA_2_KEY, TASMOTA_2_CHANNELS},
+        // };
+        // uint8_t n = 0;
+        // for (const auto &d : defaults)
+        // {
+        //     out[n] = hmi::DeviceInfo{};
+        //     strlcpy(out[n].name, d.name, sizeof(out[n].name));
+        //     strlcpy(out[n].key, d.key, sizeof(out[n].key));
+        //     out[n].channels = d.channels;
+        //     n++;
+        // }
+        // return n;
+
+        return 0;
     }
 
 } // namespace
@@ -796,7 +803,7 @@ void setup()
     const uint8_t deviceCount = deviceList(devices);
     hmi::configureDevices(devices, deviceCount); // the Control page is built for these
     hmi::begin(display, cb);                     // "ui" task, core 1
-    tasmota::start(devices, deviceCount, g_sdConfig.hasTasmotaApi ? g_sdConfig.tasmotaApi : TASMOTA_API_URL);
+    // tasmota::start(devices, deviceCount, g_sdConfig.hasTasmotaApi ? g_sdConfig.tasmotaApi : TASMOTA_API_URL);
 
     storage::start();
     xTaskCreatePinnedToCore(appTask, "app", 4 * 1024, nullptr, 4, nullptr, 1);
