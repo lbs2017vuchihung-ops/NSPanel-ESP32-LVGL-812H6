@@ -7,9 +7,9 @@
 
 struct SlaveRecord
 {
-    bool paired = false;
-    uint8_t mac[6] = {0};
-    uint32_t lastSeenMs = 0;
+    bool paired = false;     // check đã từng ghép đôi chưa
+    uint8_t mac[6] = {0};    // Địa chỉ mac phần cứng 6byte
+    uint32_t lastSeenMs = 0; // Mốc thời gian millis() cuối cùng nhận được từ gói tin này
 };
 
 static SensorDataCallback s_sensorCb = nullptr;
@@ -77,6 +77,39 @@ static void onDataRecv(const uint8_t *mac, const uint8_t *data, int len)
     }
 }
 
+/////////////////////////////// Cơ chế hoạt động //////////////////////////////|
+// - Mục tiêu hàm: kích hoạt giao thức ESP_NOW trên hạ tầng phần cứng có sẵn   |
+//                 của ESP32-S3 -> đồng thời thiết lập cầu nối dữ liệu an toàn |
+//                 giữa các tác vụ mạng ở Core 0 và đồ họa interface ở COre 1  |
+// - Wifi.mode(WIFI_STA): Bắt buộc phải có trước espnowInit() -> vì ESP32 không|
+//                        có chip radio riêng cho ESP_NOW mà sẽ dùng chung tầng|
+//                        phần cứng MAC 802.11 của Wifi và anten 2.4GHz -> khi |
+//                        gọi hàm wifi này mới kích hoạt tầng phần cứng ở dưới |
+//                        => từ đó mới kích hoạt ESP_now qua các hàm init và   |
+//                        esp_wifi_start().                                    |
+// - esp_now_init(): -> CV1: Cấp phát bảng quản lý PEER trong sram nội: tạo    |
+//                           vùng nhớ quản lý danh sách các thiết bị kết nối   |
+//                           ESP_NOW (tối đa 20 thiết bị không mã hóa)         |
+//                   -> CV2: Dù cấu hình giao diện LVGL đã được đẩy ra 8MB     |
+//                           PSRAM -> tuy nhiên vùng SRAM nội vẫn phải chia sẻ |
+//                           cho bộ đệm wifi và MQTT => kiểm tra != ESP_OK giúp|
+//                           thoát sớm nếu hệ thống bị thiếu RAM để khơi tạo   |
+//                           ESPNOW -> tránh gây treo chip.                    |
+//                   -> CV3: Đăng ký mã định danh của nhà sản xuất vào bộ lọc  |
+//                           phần cứng Wifi -> sau khi thu nhận được gói tin   |
+//                           espnow -> đẩy thẳng sang bộ xử lý espnow thay vì  |
+//                           xếp vào ngắn xếp mạng TCP/IP.                     |
+// - esp_now_register_recv_cb(onDataRecv): Hàng đợi đăng ký onDataRecv vào driver |
+//                                         wifi lúc nào có gói tin thì ondatarecv |
+//                                         tự động kích hoạt và thêm vào hàng đợi |
+//                   -> Hàm callback onDataRecv không chạy trong ngữ cảnh ngắt ISR|
+//                      mà chạy trong tác vụ hệ thống FreeRTOS wifi trên core 0   |
+//                   -> Trong hàm callback onDataRecv có các hàm như là printf,   |
+//                      send, ping_ack (không được delay()).                      |
+// - Serial.printf("[ESP-NOW] Multi-Slave Master Ready | MAC: %s\n", WiFi.macAddress().c_str()): |
+//             -> in ra địa chỉ Mac byte của master để kiểm tra                                  |
+/////////////////////////////////////////////////////////////////////////////////////////////////|
+
 void espnowInit(SensorDataCallback onSensorCb)
 {
     s_sensorCb = onSensorCb;
@@ -89,6 +122,11 @@ void espnowInit(SensorDataCallback onSensorCb)
     Serial.printf("[ESP-NOW] Multi-Slave Master Ready | MAC: %s\n", WiFi.macAddress().c_str());
 }
 
+//////////////////////// Cơ chế hoạt động ////////////////////////|
+// Hàm chịu trách nhiệm đóng gói lệnh điều khiển máy lạnh từ màn  |
+// hình cảm ứng hoặc server core IOT thành khung data 21byte để   |
+// gửi đến ESP32 slave.                                           |
+//////////////////////////////////////////////////////////////////|
 bool espnowSendAcCommand(uint8_t acId, bool power, uint8_t temp, uint8_t mode, uint8_t fan)
 {
     // Ánh xạ mặc định: Máy lạnh 1 -> gửi cho Node 1; Máy lạnh 2 -> gửi cho Node 2; Máy lạnh 3 -> gửi cho Node 3
@@ -115,6 +153,10 @@ bool espnowSendAcCommand(uint8_t acId, bool power, uint8_t temp, uint8_t mode, u
     return (err == ESP_OK);
 }
 
+/////////////////////////////////// Cơ chế hoạt động ///////////////////////////////////|
+// - Mục tiêu hàm: Giám sát thụ động giúp xác định xem slave còn hoạt động hay là không |
+//                 mà không cân tốn băng thông hỏi thăm liên tục.                       |
+////////////////////////////////////////////////////////////////////////////////////////|
 bool espnowIsNodeOnline(uint8_t nodeId)
 {
     if (nodeId == 0 || nodeId > kMaxSlaves)
