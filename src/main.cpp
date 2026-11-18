@@ -487,8 +487,12 @@ namespace
             }
             maintainMqtt(now);
             g_mqtt.loop();
-            if (g_publishPending.exchange(false))
+            static uint32_t lastPub = 0;
+            if (g_publishPending.exchange(false) || (now - lastPub >= 5000))
+            {
+                lastPub = now;
                 publishState();
+            }
             if (otaStarted)
                 ArduinoOTA.handle();
             feedHmiStatus(now);
@@ -753,9 +757,9 @@ void setup()
     // PSRAM history/event rings first: storage::begin() restores into them.
     datalog::begin();
     // SD after the display: SCK/MOSI are shared with the ST7701 init bus.
-    storage::begin();
-    storage::logEvent("Boot fw=%s reset=%d", FIRMWARE_VERSION, (int)esp_reset_reason());
-    if (storage::loadConfig(g_sdConfig))
+    //storage::begin();
+    //storage::logEvent("Boot fw=%s reset=%d", FIRMWARE_VERSION, (int)esp_reset_reason());
+    /*if (storage::loadConfig(g_sdConfig))
     {
         if (g_sdConfig.mqttHost[0])
             strlcpy(g_mqttHost, g_sdConfig.mqttHost, sizeof(g_mqttHost));
@@ -766,7 +770,7 @@ void setup()
         if (g_sdConfig.mqttPass[0])
             strlcpy(g_mqttPass, g_sdConfig.mqttPass, sizeof(g_mqttPass));
         hmi::setRoomName(g_sdConfig.room);
-    }
+    }*/
 
     g_prefs.begin("hmi", false);
     hmi::setBrightness(g_prefs.getUChar("bright", 80));
@@ -798,7 +802,7 @@ void setup()
     hmi::begin(display, cb);                     // "ui" task, core 1
     tasmota::start(devices, deviceCount, g_sdConfig.hasTasmotaApi ? g_sdConfig.tasmotaApi : TASMOTA_API_URL);
 
-    storage::start();
+    //storage::start();
     xTaskCreatePinnedToCore(appTask, "app", 4 * 1024, nullptr, 4, nullptr, 1);
     xTaskCreatePinnedToCore(netTask, "net", 8 * 1024, nullptr, 2, nullptr, 0);
     xTaskCreatePinnedToCore(consoleTask, "console", 4 * 1024, nullptr, 1, nullptr, 0);
