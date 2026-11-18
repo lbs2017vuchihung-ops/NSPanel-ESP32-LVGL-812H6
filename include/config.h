@@ -36,7 +36,7 @@
 #define DISPLAY_BACKLIGHT_PIN 38
 
 // ===== HMI (LVGL) =====
-#define HMI_ROOM_NAME "Phòng khách"            // header title (UTF-8)
+#define HMI_ROOM_NAME "Phòng Lab 812H6"            // header title (UTF-8)
 #define HMI_DIM_AFTER_MS 120000                // screensaver + dim after 2 min idle (toggle in Settings)
 #define HMI_DIM_BRIGHTNESS_PCT 0               // auto-dim level on the slider scale (0 = floor)
 // Slider 0..100 % maps linearly onto LEDC duty HMI_BACKLIGHT_MIN_DUTY..255, so
@@ -74,22 +74,22 @@
 //   POST <url> {"device":"primary","channel":1,"action":"toggle"} -> {"device","states":{..}}
 // KEY is the device name on the gateway.  /config.json overrides:
 //   "tasmotaApi": "<url>", "tasmota": [{"name","key","channels","labels":[...]}]
-#define TASMOTA_API_URL "https://smarthome.blong.id.vn/api/tasmota"
-#define TASMOTA_1_NAME "Sonoff M5-3C"
-#define TASMOTA_1_KEY "primary"
-#define TASMOTA_1_CHANNELS 3
-#define TASMOTA_2_NAME "TX Ultimate 4C"
-#define TASMOTA_2_KEY "secondary"
-#define TASMOTA_2_CHANNELS 4
+// #define TASMOTA_API_URL "https://smarthome.blong.id.vn/api/tasmota"
+// #define TASMOTA_1_NAME "Sonoff M5-3C"
+// #define TASMOTA_1_KEY "primary"
+// #define TASMOTA_1_CHANNELS 3
+// #define TASMOTA_2_NAME "TX Ultimate 4C"
+// #define TASMOTA_2_KEY "secondary"
+// #define TASMOTA_2_CHANNELS 4
 // 1 s: changes made on the web or on the switches show within ~1.5 s, and the
 // TLS connection never idles long enough for the server (~5 s keep-alive) to
 // close it - a closed one costs a 2 s timeout plus a ~3 s new handshake.
 #define TASMOTA_POLL_MS 1000
 
 // UTF-8 relay names (Control screen).
-#define RELAY_NAME_1 "Phòng khách"
-#define RELAY_NAME_2 "Điều hòa"
-#define RELAY_NAME_3 "Ổ cắm"
+#define RELAY_NAME_1 "Đèn phòng 812H6"
+#define RELAY_NAME_2 "Nhánh tải 2"
+#define RELAY_NAME_3 "Nhánh tải 3"
 
 // ===== GPIO Pin Definitions =====
 // RGB Interface (parallel 16-bit)
