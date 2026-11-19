@@ -1,13 +1,13 @@
 // Business logic as FreeRTOS tasks.  The LVGL HMI (src/hmi/) runs in its own
 // "ui" task and is driven only through include/hmi.h.
 //
-//   task      core prio  owns
-//   ui          1   3    LVGL, touch, backlight              (src/hmi/hmi_ui.cpp)
-//   app         1   4    relays, sensors, settings (NVS)     queue: AppMsg
-//   net         0   2    Wi-Fi manager, MQTT, OTA, NTP       queue: NetMsg
-//   devices     0   2    Tasmota relays over HTTP            (src/tasmota.cpp)
-//   storage     0   1    SD card: logs, stats, fw update     (src/storage.cpp)
-//   console     0   1    serial commands
+//   task       core prio  owns
+//   ui          1   3     LVGL, touch, backlight              (src/hmi/hmi_ui.cpp)
+//   app         1   4     relays, sensors, settings (NVS)     queue: AppMsg
+//   net         0   2     Wi-Fi manager, MQTT, OTA, NTP       queue: NetMsg
+//   devices     0   2     Tasmota relays over HTTP            (src/tasmota.cpp)
+//   storage     0   1     SD card: logs, stats, fw update     (src/storage.cpp)
+//   console     0   1     serial commands
 //
 // Tasks never call each other's code directly: they post messages.  Shared
 // state is either in the HMI model (locked) or std::atomic.
@@ -58,10 +58,16 @@ namespace
 
     // ===================== messages =====================
 
+    std::atomic<bool> g_acOn[hmi::kAcCount];
+    std::atomic<uint8_t> g_acTemp[hmi::kAcCount];
+
     enum class AppCmd : uint8_t
     {
         RelayToggle,
         RelaySet,
+        AcSetPower, // flag = power
+        AcSetTemp,  // v[0] = temp
+        AcSetFull,  // flag = power, v[0] = temp (dùng cho Serial / RPC kèm nhiệt độ)
         Sensors,
         SensorPreview,
         SaveBrightness,
@@ -96,8 +102,41 @@ namespace
     void postNet(const NetMsg &m) { xQueueSend(g_netQ, &m, 0); }
 
     // ===================== app task =====================
+    Preferences g_prefs; // Đặt trước applyAcControl để tránh lỗi biên dịch
 
-    Preferences g_prefs;
+    uint32_t g_acLastPowerMs[hmi::kAcCount] = {};  // Mốc thời gian bật/tắt gần nhất
+    bool g_acTempPending[hmi::kAcCount] = {};      // Cờ chờ chốt nhiệt độ sau khi ngừng kéo
+    uint32_t g_acTempChangeMs[hmi::kAcCount] = {}; // Mốc thời gian kéo thanh trượt gần nhất
+
+    constexpr uint32_t kAcPowerCooldownMs = 1500; // Khóa chống bấm bật/tắt liên tục dưới 1.5 giây
+    constexpr uint32_t kAcTempDebounceMs = 450;   // Chờ ngừng kéo 450ms mới gửi ESP-NOW & ghi NVS
+
+    void applyAcControl(uint8_t index, bool on, uint8_t temp, bool persistTemp = false)
+    {
+        if (index >= hmi::kAcCount)
+            return;
+        temp = constrain(temp, 16, 30);
+
+        g_acOn[index] = on;
+        g_acTemp[index] = temp;
+
+        if (persistTemp)
+        {
+            char key[12];
+            snprintf(key, sizeof(key), "ac_t%u", index);
+            g_prefs.putUChar(key, temp);
+        }
+
+        // 1. Đồng bộ Model -> HMI UI
+        hmi::setAc(index, on, static_cast<float>(temp), true);
+
+        // 2. Gửi gói tin ESP-NOW tới Slave tương ứng (index 0->Node 1, 1->Node 2, 2->Node 3)
+        espnowSendAcCommand(index + 1, on, temp);
+
+        // 3. Ghi log & báo netTask đẩy telemetry lên CoreIoT
+        storage::logEvent("AC %u %s (%uC)", index + 1, on ? "ON" : "OFF", temp);
+        g_publishPending = true;
+    }
 
     struct SensorValues
     {
@@ -195,10 +234,79 @@ namespace
                 case AppCmd::SaveTheme:
                     g_prefs.putUChar("theme", m.index);
                     break;
+                case AppCmd::AcSetPower:
+                    if (m.index < hmi::kAcCount)
+                    {
+                        if (g_acOn[m.index].load() == m.flag)
+                            break;
+
+                        const uint32_t nowMs = millis();
+                        if (g_acLastPowerMs[m.index] != 0 && (nowMs - g_acLastPowerMs[m.index] < kAcPowerCooldownMs))
+                        {
+                            Serial.printf("[AC%u] Chan thao tac bat/tat qua nhanh (<%lums)\n",
+                                          m.index + 1, (unsigned long)kAcPowerCooldownMs);
+                            // Ép gạt trả nút switch trên màn hình về lại trạng thái thật
+                            hmi::setAc(m.index, g_acOn[m.index].load(), static_cast<float>(g_acTemp[m.index].load()), true);
+                            break;
+                        }
+
+                        g_acLastPowerMs[m.index] = nowMs;
+                        g_acTempPending[m.index] = false; // Hủy pending nhiệt độ cũ vì lệnh nguồn bên dưới đã gửi kèm nhiệt độ mới nhất
+                        applyAcControl(m.index, m.flag, g_acTemp[m.index].load(), false);
+                    }
+                    break;
+
+                case AppCmd::AcSetTemp:
+                    if (m.index < hmi::kAcCount)
+                    {
+                        uint8_t newTemp = static_cast<uint8_t>(constrain(lroundf(m.v[0]), 16, 30));
+                        if (g_acTemp[m.index].load() != newTemp)
+                        {
+                            // Cập nhật ngay UI & biến trạng thái, hoãn gửi ESP-NOW/NVS 450ms để chống kéo liên tục
+                            g_acTemp[m.index] = newTemp;
+                            hmi::setAc(m.index, g_acOn[m.index].load(), static_cast<float>(newTemp));
+                            g_acTempPending[m.index] = true;
+                            g_acTempChangeMs[m.index] = millis();
+                        }
+                    }
+                    break;
+
+                case AppCmd::AcSetFull:
+                    if (m.index < hmi::kAcCount)
+                    {
+                        uint8_t newTemp = static_cast<uint8_t>(constrain(lroundf(m.v[0]), 16, 30));
+                        if (g_acOn[m.index].load() == m.flag && g_acTemp[m.index].load() == newTemp)
+                            break;
+                        g_acLastPowerMs[m.index] = millis();
+                        g_acTempPending[m.index] = false;
+                        applyAcControl(m.index, m.flag, newTemp, true);
+                    }
+                    break;
                 }
             }
 
             const uint32_t now = millis();
+            for (uint8_t i = 0; i < hmi::kAcCount; i++) // chốt giá trị sau khi ngừng kéo thanh trượt
+            {
+                if (g_acTempPending[i] && (now - g_acTempChangeMs[i] >= kAcTempDebounceMs))
+                {
+                    g_acTempPending[i] = false;
+                    const uint8_t finalTemp = g_acTemp[i].load();
+                    const bool isOn = g_acOn[i].load();
+
+                    // 1. Lưu Flash NVS 1 lần duy nhất sau khi ngừng thao tác
+                    char key[12];
+                    snprintf(key, sizeof(key), "ac_t%u", i);
+                    g_prefs.putUChar(key, finalTemp);
+
+                    // 2. Chỉ phát gói ESP-NOW sang Slave khi máy lạnh đang BẬT (tránh IR tự kích bật máy đang tắt)
+                    if (isOn)
+                        espnowSendAcCommand(i + 1, true, finalTemp);
+
+                    storage::logEvent("AC %u temp -> %uC (%s)", i + 1, finalTemp, isOn ? "TX" : "SAVED");
+                    g_publishPending = true;
+                }
+            }
             if (simulate && now - g_bootTime > 1500 && (!lastSim || now - lastSim >= 2000))
             {
                 // No sensor wired yet: random walk until real data arrives on MQTT_TOPIC_SENSOR.
@@ -261,21 +369,32 @@ namespace
                 postApp(m);
                 Serial.printf("Received setLight: %d\n", state);
             }
-            else if (strcmp(method, "setAC1") == 0)
+            else if (strncmp(method, "setAC", 5) == 0 && method[5] >= '1' && method[5] <= '3')
             {
-                // Gửi lệnh điều khiển máy lạnh 1 qua ESP-NOW
-                espnowSendAcCommand(1, state, 25); // ID 1, trạng thái, nhiệt độ mặc định 25
-                Serial.printf("Received setAC1: %d\n", state);
-            }
-            else if (strcmp(method, "setAC2") == 0)
-            {
-                espnowSendAcCommand(2, state, 25);
-                Serial.printf("Received setAC2: %d\n", state);
-            }
-            else if (strcmp(method, "setAC3") == 0)
-            {
-                espnowSendAcCommand(3, state, 25);
-                Serial.printf("Received setAC3: %d\n", state);
+                const uint8_t idx = static_cast<uint8_t>(method[5] - '1'); // '1'..'3' -> 0..2
+                if (strcmp(method + 6, "Temp") == 0)
+                {
+                    // RPC dạng "setAC1Temp" với params là số (vd: 24)
+                    float t = doc["params"].as<float>();
+                    if (t >= 16.0f && t <= 30.0f)
+                        postApp(AppMsg{AppCmd::AcSetTemp, idx, false, {t, 0, 0}, {}});
+                }
+                else if (method[6] == '\0')
+                {
+                    // RPC dạng "setAC1" với params là bool hoặc {"power":true,"temp":24}
+                    if (doc["params"].is<JsonObject>())
+                    {
+                        JsonObject p = doc["params"];
+                        bool pwr = p["power"] | g_acOn[idx].load();
+                        float t = p["temp"].is<float>() ? p["temp"].as<float>() : static_cast<float>(g_acTemp[idx].load());
+                        postApp(AppMsg{AppCmd::AcSetFull, idx, pwr, {t, 0, 0}, {}});
+                    }
+                    else
+                    {
+                        bool pwr = doc["params"] | false;
+                        postApp(AppMsg{AppCmd::AcSetPower, idx, pwr, {}, {}});
+                    }
+                }
             }
         }
         else if (doc["relays"].is<JsonArray>())
@@ -316,6 +435,14 @@ namespace
             r["index"] = i;
             r["state"] = g_relay[i].load();
             r["last_change"] = (millis() - g_relayChange[i]) / 1000;
+        }
+        for (uint8_t i = 0; i < hmi::kAcCount; i++) // Thêm trạng thái 3 máy lạnh lên coreIOT mỗi khi có sự thay đổi
+        {
+            char kPwr[16], kTmp[16];
+            snprintf(kPwr, sizeof(kPwr), "ac%u_power", i + 1);
+            snprintf(kTmp, sizeof(kTmp), "ac%u_temp", i + 1);
+            doc[kPwr] = g_acOn[i].load();
+            doc[kTmp] = g_acTemp[i].load();
         }
         String out;
         serializeJson(doc, out);
@@ -442,7 +569,7 @@ namespace
         m.v[0] = temp;
         m.v[1] = hum;
         m.v[2] = power;
-        postApp(m);
+        postApp(m); // Đóng gói 3 thông số temp, hum, power vào struct appMsg rồi đẩy vào hàng đợi g_appQ thông qua lệnh postApp(m)
     }
 
     void netTask(void *)
@@ -476,6 +603,7 @@ namespace
                 wasUp = up;
                 if (up)
                 {
+                    //esp_wifi_set_ps(WIFI_PS_NONE);
                     storage::logEvent("Wi-Fi connected: %s %s RSSI %d", WiFi.SSID().c_str(),
                                       WiFi.localIP().toString().c_str(), WiFi.RSSI());
                     configTime(HMI_TZ_OFFSET_SECONDS, 0, "pool.ntp.org", "time.google.com");
@@ -659,11 +787,15 @@ namespace
                 }
                 else if (strncmp(line, "ac ", 3) == 0)
                 {
-                    // Cú pháp gõ trên Serial Monitor: ac 1 1 24 (Bật máy lạnh 1 ở 24 độ C) hoặc ac 1 0 24 (Tắt)
-                    int id = 1, pwr = 1, temp = 25;
-                    if (sscanf(line + 3, "%d %d %d", &id, &pwr, &temp) >= 2)
+                    int id = 1, pwr = 1, temp = -1;
+                    int n = sscanf(line + 3, "%d %d %d", &id, &pwr, &temp);
+                    if (n >= 2 && id >= 1 && id <= hmi::kAcCount)
                     {
-                        espnowSendAcCommand((uint8_t)id, pwr != 0, (uint8_t)temp);
+                        const uint8_t idx = static_cast<uint8_t>(id - 1);
+                        if (n >= 3)
+                            postApp(AppMsg{AppCmd::AcSetFull, idx, pwr != 0, {static_cast<float>(temp), 0, 0}, {}});
+                        else
+                            postApp(AppMsg{AppCmd::AcSetPower, idx, pwr != 0, {}, {}});
                     }
                 }
                 else
@@ -678,6 +810,12 @@ namespace
     // ===================== HMI callbacks (run in the ui task: post only) =====================
 
     void onRelayToggle(uint8_t i) { postApp(AppMsg{AppCmd::RelayToggle, i, false, {}, {}}); }
+    void onAcToggle(uint8_t i, bool on) { postApp(AppMsg{AppCmd::AcSetPower, i, on, {}, {}}); }
+    void onAcTemp(uint8_t i, uint8_t rawTemp)
+    {
+        const float tempC = static_cast<float>(rawTemp) / 2.0f; // slider 32..60 -> 16.0..30.0°C
+        postApp(AppMsg{AppCmd::AcSetTemp, i, false, {tempC, 0, 0}, {}});
+    }
     void onBrightnessChanged(uint8_t pct) { postApp(AppMsg{AppCmd::SaveBrightness, pct, false, {}, {}}); }
     void onAutoDimChanged(bool on) { postApp(AppMsg{AppCmd::SaveAutoDim, 0, on, {}, {}}); }
     void onThemeChanged(uint8_t i) { postApp(AppMsg{AppCmd::SaveTheme, i, false, {}, {}}); }
@@ -776,6 +914,15 @@ void setup()
     }
 
     g_prefs.begin("hmi", false);
+    for (uint8_t i = 0; i < hmi::kAcCount; i++)
+    {
+        char key[12];
+        snprintf(key, sizeof(key), "ac_t%u", i);
+        uint8_t savedTemp = constrain(g_prefs.getUChar(key, 27), 16, 30);
+        g_acOn[i] = false;
+        g_acTemp[i] = savedTemp;
+        hmi::setAc(i, false, static_cast<float>(savedTemp));
+    }
     hmi::setBrightness(g_prefs.getUChar("bright", 80));
     hmi::setAutoDim(g_prefs.getBool("autodim", true));
     hmi::setTheme(g_prefs.getUChar("theme", 0));
@@ -788,6 +935,8 @@ void setup()
 
     hmi::Callbacks cb;
     cb.relayToggle = onRelayToggle;
+    cb.acToggle = onAcToggle;
+    cb.acTemp = onAcTemp;
     cb.brightnessChanged = onBrightnessChanged;
     cb.autoDimChanged = onAutoDimChanged;
     cb.themeChanged = onThemeChanged;

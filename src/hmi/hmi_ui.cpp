@@ -92,8 +92,8 @@ namespace hmi
             lv_obj_t *sliderValue;
             // settings
             // 3 biến thanh trượt và 3 chữ nhiệt độ máy lạnh
-            lv_obj_t *acSlider[3];
-            lv_obj_t *acLabel[3];
+            //lv_obj_t *acSlider[3];
+            //lv_obj_t *acLabel[3];
 
             lv_obj_t *dimSwitch;
             lv_obj_t *sysWifi;
@@ -159,6 +159,12 @@ namespace hmi
             lv_timer_t *saverTimer;
             uint8_t saverStep;
             bool dimmed = false;
+
+            // Trong struct Ui (cùng nhóm với relaySwitch / slider):
+            lv_obj_t *acSwitch[kAcCount] = {};
+            lv_obj_t *acTempRow[kAcCount] = {};
+            lv_obj_t *acSlider[kAcCount] = {};
+            lv_obj_t *acTempLabel[kAcCount] = {};
         };
         Ui ui;
         // Copy of the model taken under ModelLock at the start of every UI tick.  All
@@ -758,13 +764,15 @@ namespace hmi
             sectionTitle(page, "ĐIỀU KHIỂN MÁY LẠNH");
             lv_obj_t *acCard = settingsCard(page);
 
-            for (int i = 0; i < 3; i++)
+            for (int i = 0; i < kAcCount; i++)
             {
+                void *idxPtr = reinterpret_cast<void *>(static_cast<uintptr_t>(i));
+
                 lv_obj_t *r = box(acCard);
                 lv_obj_set_size(r, LV_PCT(100), 54);
                 lv_obj_set_style_pad_hor(r, 16, 0);
 
-                if (i < 2)
+                if (i < kAcCount - 1)
                 {
                     lv_obj_set_style_border_side(r, LV_BORDER_SIDE_BOTTOM, 0);
                     lv_obj_set_style_border_width(r, 1, 0);
@@ -780,27 +788,25 @@ namespace hmi
                 lv_obj_set_pos(t, 32, 16);
 
                 // --- 1. CÔNG TẮC ---
-                lv_obj_t *sw = lv_switch_create(r);
-                lv_obj_align(sw, LV_ALIGN_TOP_RIGHT, 0, 12);
-                // 1. Chỉnh màu khi TẮT (Mặc định)
-                lv_obj_set_style_bg_color(sw, lv_color_hex(0x404040), LV_PART_MAIN); // Nền xám đen
-                lv_obj_set_style_bg_color(sw, lv_color_hex(0xB0B0B0), LV_PART_KNOB); // Cục tròn xám nhạt
+                ui.acSwitch[i] = lv_switch_create(r);
+                lv_obj_align(ui.acSwitch[i], LV_ALIGN_TOP_RIGHT, 0, 12);
+                lv_obj_set_style_bg_color(ui.acSwitch[i], lv_color_hex(0x404040), LV_PART_MAIN);
+                lv_obj_set_style_bg_color(ui.acSwitch[i], lv_color_hex(0xB0B0B0), LV_PART_KNOB);
+                lv_obj_set_style_bg_color(ui.acSwitch[i], info(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+                lv_obj_set_style_bg_color(ui.acSwitch[i], lv_color_hex(0xFFFFFF), LV_PART_KNOB | LV_STATE_CHECKED);
 
-                // 2. Chỉnh màu khi BẬT (Giống công tắc Đèn)
-                lv_obj_set_style_bg_color(sw, info(), LV_PART_INDICATOR | LV_STATE_CHECKED);            // Nền xanh lơ
-                lv_obj_set_style_bg_color(sw, lv_color_hex(0xFFFFFF), LV_PART_KNOB | LV_STATE_CHECKED); // Cục tròn trắng tinh
                 // --- 2. THANH TRƯỢT ---
-                lv_obj_t *sliderContainer = lv_obj_create(r);
-                lv_obj_remove_style_all(sliderContainer);
-                lv_obj_set_size(sliderContainer, LV_PCT(100), 40);
-                lv_obj_set_pos(sliderContainer, 0, 54);
-                lv_obj_add_flag(sliderContainer, LV_OBJ_FLAG_HIDDEN);
+                ui.acTempRow[i] = lv_obj_create(r);
+                lv_obj_remove_style_all(ui.acTempRow[i]);
+                lv_obj_set_size(ui.acTempRow[i], LV_PCT(100), 40);
+                lv_obj_set_pos(ui.acTempRow[i], 0, 54);
+                lv_obj_add_flag(ui.acTempRow[i], LV_OBJ_FLAG_HIDDEN);
 
                 // Chữ hiển thị (Mặc định 27.0°C)
-                ui.acLabel[i] = label(sliderContainer, &hmi_font_14_m, muted(), "27.0°C");
-                lv_obj_align(ui.acLabel[i], LV_ALIGN_TOP_RIGHT, 0, 0);
+                ui.acTempLabel[i] = label(ui.acTempRow[i], &hmi_font_14_m, muted(), "27.0°C");
+                lv_obj_align(ui.acTempLabel[i], LV_ALIGN_TOP_RIGHT, 0, 0);
 
-                ui.acSlider[i] = lv_slider_create(sliderContainer);
+                ui.acSlider[i] = lv_slider_create(ui.acTempRow[i]);
                 lv_obj_remove_style_all(ui.acSlider[i]);
                 lv_obj_set_size(ui.acSlider[i], 400, 8);
                 lv_obj_align(ui.acSlider[i], LV_ALIGN_BOTTOM_MID, 0, -10);
@@ -823,36 +829,48 @@ namespace hmi
                 // --- 3. XỬ LÝ SỰ KIỆN KÉO THANH TRƯỢT ---
                 lv_obj_add_event_cb(ui.acSlider[i], [](lv_event_t *e)
                                     {
-                lv_obj_t* slider = (lv_obj_t*)lv_event_get_target(e);
-                lv_obj_t* lbl = (lv_obj_t*)lv_event_get_user_data(e);
-                
-                int val = (int)lv_slider_get_value(slider);
-                int phan_nguyen = val / 2;
-                int phan_thap_phan = (val % 2) * 5;
-                
-                lv_label_set_text_fmt(lbl, "%d.%d°C", phan_nguyen, phan_thap_phan); }, LV_EVENT_VALUE_CHANGED, ui.acLabel[i]);
+            auto *slider = static_cast<lv_obj_t *>(lv_event_get_target(e));
+            const auto idx = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
+            if (!ui.acTempLabel[idx]) return;
 
-                // Sự kiện gạt công tắc ẩn/hiện thanh trượt
-                lv_obj_add_event_cb(sw, [](lv_event_t *e)
+            const int val = static_cast<int>(lv_slider_get_value(slider));
+            lv_label_set_text_fmt(ui.acTempLabel[idx], "%d.%d°C", val / 2, (val % 2) * 5);
+
+            // Gửi giá trị thanh trượt (32..60) về appTask -> debounce 450ms -> bắn ESP-NOW
+            if (ui.cb.acTemp)
+            {
+                ui.cb.acTemp(idx, static_cast<uint8_t>(val));
+            } }, LV_EVENT_VALUE_CHANGED, idxPtr);
+
+                // --- 4. SỰ KIỆN GẠT CÔNG TẮC BẬT/TẮT MÁY LẠNH ---
+                lv_obj_add_event_cb(ui.acSwitch[i], [](lv_event_t *e)
                                     {
-                lv_obj_t* switch_obj = (lv_obj_t*)lv_event_get_target(e);
-                lv_obj_t* s_container = (lv_obj_t*)lv_event_get_user_data(e);
-                lv_obj_t* parent_box = lv_obj_get_parent(s_container);
-                
-                if (ui.cb.relayToggle) {
-                    ui.cb.relayToggle(1);//Nghe tiếng tách mỗi khi mở
-                }
+            auto *switch_obj = static_cast<lv_obj_t *>(lv_event_get_target(e));
+            const auto idx = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
+            lv_obj_t *s_container = ui.acTempRow[idx];
+            if (!s_container) return;
 
-                if (lv_obj_has_state(switch_obj, LV_STATE_CHECKED)) {
-                    lv_obj_clear_flag(s_container, LV_OBJ_FLAG_HIDDEN);
-                    lv_obj_set_height(parent_box, 100); 
-                } else {
-                    lv_obj_add_flag(s_container, LV_OBJ_FLAG_HIDDEN); 
-                    lv_obj_set_height(parent_box, 54); 
-                } }, LV_EVENT_VALUE_CHANGED, sliderContainer);
+            lv_obj_t *parent_box = lv_obj_get_parent(s_container);
+            const bool on = lv_obj_has_state(switch_obj, LV_STATE_CHECKED);
+
+            // Gửi lệnh Bật/Tắt máy lạnh (idx: 0..2) sang appTask -> bắn ESP-NOW tới Slave
+            if (ui.cb.acToggle)
+            {
+                ui.cb.acToggle(idx, on);
+            }
+
+            if (on)
+            {
+                lv_obj_remove_flag(s_container, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_set_height(parent_box, 100);
+            }
+            else
+            {
+                lv_obj_add_flag(s_container, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_set_height(parent_box, 54);
+            } }, LV_EVENT_VALUE_CHANGED, idxPtr);
             }
         }
-
         void applyRelays(const Model &m)
         {
             for (int i = 0; i < RELAY_COUNT; i++)
@@ -863,6 +881,39 @@ namespace hmi
                 const lv_color_t onColor[RELAY_COUNT] = {lamp(), info(), success()}; // per palette
                 lv_obj_set_style_text_color(ui.relayIcon[i], on ? onColor[i] : muted(), 0);
                 lv_label_set_text_fmt(ui.relayStatus[i], "%s · Kênh %d", on ? "Đang bật" : "Đã tắt", i + 1);
+            }
+        }
+
+        void applyAc(const Model &m)
+        {
+            for (int i = 0; i < kAcCount; i++)
+            {
+                if (!ui.acSwitch[i] || !ui.acTempRow[i] || !ui.acSlider[i] || !ui.acTempLabel[i])
+                    continue;
+
+                const bool on = m.acOn[i];
+                setChecked(ui.acSwitch[i], on);
+
+                lv_obj_t *parent_box = lv_obj_get_parent(ui.acTempRow[i]);
+                if (on)
+                {
+                    lv_obj_remove_flag(ui.acTempRow[i], LV_OBJ_FLAG_HIDDEN);
+                    if (parent_box)
+                        lv_obj_set_height(parent_box, 100);
+                }
+                else
+                {
+                    lv_obj_add_flag(ui.acTempRow[i], LV_OBJ_FLAG_HIDDEN);
+                    if (parent_box)
+                        lv_obj_set_height(parent_box, 54);
+                }
+
+                // Hỗ trợ cả trường hợp Model lưu độ nguyên (16..30) hoặc nhân đôi (32..60)
+                const int raw = m.acTemp[i];
+                const int val = constrain(raw <= 30 ? raw * 2 : raw, 32, 60);
+                if (!lv_obj_has_state(ui.acSlider[i], LV_STATE_PRESSED))
+                    lv_slider_set_value(ui.acSlider[i], val, LV_ANIM_OFF);
+                lv_label_set_text_fmt(ui.acTempLabel[i], "%d.%d°C", val / 2, (val % 2) * 5);
             }
         }
 
@@ -3408,6 +3459,13 @@ namespace hmi
     // Build (or rebuild after a palette change) every widget for the current palette.
     void buildAll()
     {
+        for (uint8_t i = 0; i < kAcCount; i++)
+        {
+            ui.acSwitch[i] = nullptr;
+            ui.acSlider[i] = nullptr;
+            ui.acTempLabel[i] = nullptr;
+            ui.acTempRow[i] = nullptr;
+        }
         const Callbacks cb = ui.cb;
         const uint8_t page = ui.current;
         const bool dimmed = ui.dimmed;
@@ -3608,6 +3666,8 @@ namespace hmi
             }
             if (d & D_RELAYS)
                 applyRelays(m);
+            if (d & D_AC)
+                applyAc(m);
             if (d & D_BRIGHTNESS)
             {
                 lv_slider_set_value(ui.slider, m.brightness, LV_ANIM_OFF);
@@ -3656,7 +3716,7 @@ namespace hmi
             {
                 ModelLock lock;
                 s_snap = model();
-                model().dirty &= ~D_THEME; // the first build below already uses the palette
+                model().dirty = (model().dirty & ~D_THEME) | D_AC;
             }
             buildAll();
             esp_task_wdt_add(nullptr);
