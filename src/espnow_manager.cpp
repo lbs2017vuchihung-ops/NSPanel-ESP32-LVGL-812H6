@@ -221,12 +221,11 @@ void espnowInit(SensorDataCallback onSensorCb)
 
 //////////////////////////////////////////////////////////////////|
 
-bool espnowSendAcCommand(uint8_t acId, bool power, uint8_t temp, uint8_t mode, uint8_t fan)
+bool espnowSendAcCommand(uint8_t acId, bool power, uint8_t temp, uint8_t fan, uint8_t swing)
 {
     if (acId < 1 || acId > 3)
         return false;
 
-    // Tất cả 3 máy lạnh đều điều khiển thông qua Slave #1 (gắn 3 mắt phát IR)
     const uint8_t targetNode = 1;
     if (!s_nodes[targetNode].paired)
     {
@@ -237,15 +236,15 @@ bool espnowSendAcCommand(uint8_t acId, bool power, uint8_t temp, uint8_t mode, u
     EspNowPacket pkt = {};
     pkt.msg_type = MSG_AC_CMD;
     pkt.node_id = targetNode;
-    pkt.ac_id = acId; // Giữ nguyên ID máy lạnh (1, 2, 3) để Slave phân luồng chân IR
+    pkt.ac_id = acId;
     pkt.ac_power = power;
     pkt.ac_temp = temp;
-    pkt.ac_mode = mode;
     pkt.ac_fan = fan;
+    pkt.ac_swing = swing;
 
     esp_err_t err = esp_now_send(s_nodes[targetNode].mac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
-    Serial.printf("[ESP-NOW] TX -> Node #1 (IR_%u | AC#%u: %s, %uC) : %s\n",
-                  acId, acId, power ? "ON" : "OFF", temp, (err == ESP_OK) ? "OK" : "FAIL");
+    Serial.printf("[ESP-NOW] TX -> Node #1 (IR_%u | AC#%u: %s, %uC, Fan:%u, Swing:%u) : %s\n",
+                  acId, acId, power ? "ON" : "OFF", temp, fan, swing, (err == ESP_OK) ? "OK" : "FAIL");
     return (err == ESP_OK);
 }
 

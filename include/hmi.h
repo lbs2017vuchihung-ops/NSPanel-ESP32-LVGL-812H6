@@ -171,6 +171,8 @@ namespace hmi
         void (*backlight)(uint8_t pct) = nullptr;       // drive the panel backlight
         void (*acToggle)(uint8_t idx, bool on) = nullptr;
         void (*acTemp)(uint8_t idx, uint8_t rawTemp) = nullptr;
+        void (*acFan)(uint8_t idx, uint8_t fan) = nullptr;
+        void (*acSwing)(uint8_t idx, uint8_t swing) = nullptr;
     };
 
     void configureDevices(const DeviceInfo *list, uint8_t count); // before begin()
@@ -216,4 +218,5 @@ namespace hmi
     // 24-bit BMP of the current screen (e.g. to a File on the SD card).
     bool screenshotBmp(Print &out);
     void setAc(uint8_t idx, bool on, float temp, bool force = false);
+    void setAcFanSwing(uint8_t idx, uint8_t fan, uint8_t swing);
 } // namespace hmi

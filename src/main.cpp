@@ -60,14 +60,18 @@ namespace
 
     std::atomic<bool> g_acOn[hmi::kAcCount];
     std::atomic<uint8_t> g_acTemp[hmi::kAcCount];
+    std::atomic<uint8_t> g_acFan[hmi::kAcCount];   // 0=Auto, 1=Yên tĩnh, 2..6=Mức 1..5
+    std::atomic<uint8_t> g_acSwing[hmi::kAcCount]; // 0=Off, 1=On
 
     enum class AppCmd : uint8_t
     {
         RelayToggle,
         RelaySet,
         AcSetPower, // flag = power
-        AcSetTemp,  // v[0] = temp
-        AcSetFull,  // flag = power, v[0] = temp (dùng cho Serial / RPC kèm nhiệt độ)
+        AcSetTemp,  // v[0] = temp (18..32)
+        AcSetFan,   // v[0] = fan (0..6)
+        AcSetSwing, // flag = swing (0/1)
+        AcSetFull,  // flag = power, v[0] = temp, v[1] = fan (-1 giữ nguyên), v[2] = swing (-1 giữ nguyên)
         Sensors,
         SensorPreview,
         SaveBrightness,
@@ -111,30 +115,42 @@ namespace
     constexpr uint32_t kAcPowerCooldownMs = 1500; // Khóa chống bấm bật/tắt liên tục dưới 1.5 giây
     constexpr uint32_t kAcTempDebounceMs = 450;   // Chờ ngừng kéo 450ms mới gửi ESP-NOW & ghi NVS
 
-    void applyAcControl(uint8_t index, bool on, uint8_t temp, bool persistTemp = false)
+    void saveAcPrefs(uint8_t index, uint8_t temp, uint8_t fan, uint8_t swing)
+    {
+        char key[12];
+        snprintf(key, sizeof(key), "ac_t%u", index);
+        g_prefs.putUChar(key, temp);
+        snprintf(key, sizeof(key), "ac_f%u", index);
+        g_prefs.putUChar(key, fan);
+        snprintf(key, sizeof(key), "ac_s%u", index);
+        g_prefs.putUChar(key, swing);
+    }
+
+    void applyAcControl(uint8_t index, bool on, uint8_t temp, int8_t fan = -1, int8_t swing = -1, bool persist = false)
     {
         if (index >= hmi::kAcCount)
             return;
-        temp = constrain(temp, 16, 30);
+        temp = constrain(temp, 18, 32);
+        const uint8_t finalFan = (fan >= 0) ? static_cast<uint8_t>(constrain(fan, 0, 6)) : g_acFan[index].load();
+        const uint8_t finalSwing = (swing >= 0) ? (swing ? 1 : 0) : g_acSwing[index].load();
 
         g_acOn[index] = on;
         g_acTemp[index] = temp;
+        g_acFan[index] = finalFan;
+        g_acSwing[index] = finalSwing;
 
-        if (persistTemp)
-        {
-            char key[12];
-            snprintf(key, sizeof(key), "ac_t%u", index);
-            g_prefs.putUChar(key, temp);
-        }
+        if (persist)
+            saveAcPrefs(index, temp, finalFan, finalSwing);
 
         // 1. Đồng bộ Model -> HMI UI
         hmi::setAc(index, on, static_cast<float>(temp), true);
+        hmi::setAcFanSwing(index, finalFan, finalSwing);
 
-        // 2. Gửi gói tin ESP-NOW tới Slave tương ứng (index 0->Node 1, 1->Node 2, 2->Node 3)
-        espnowSendAcCommand(index + 1, on, temp);
+        // 2. Gửi gói tin ESP-NOW tới Slave trung tâm (Node #1) kèm đủ Temp, Fan, Swing
+        espnowSendAcCommand(index + 1, on, temp, finalFan, finalSwing);
 
         // 3. Ghi log & báo netTask đẩy telemetry lên CoreIoT
-        storage::logEvent("AC %u %s (%uC)", index + 1, on ? "ON" : "OFF", temp);
+        storage::logEvent("AC %u %s (%uC F:%u S:%u)", index + 1, on ? "ON" : "OFF", temp, finalFan, finalSwing);
         g_publishPending = true;
     }
 
@@ -245,21 +261,20 @@ namespace
                         {
                             Serial.printf("[AC%u] Chan thao tac bat/tat qua nhanh (<%lums)\n",
                                           m.index + 1, (unsigned long)kAcPowerCooldownMs);
-                            // Ép gạt trả nút switch trên màn hình về lại trạng thái thật
                             hmi::setAc(m.index, g_acOn[m.index].load(), static_cast<float>(g_acTemp[m.index].load()), true);
                             break;
                         }
 
                         g_acLastPowerMs[m.index] = nowMs;
-                        g_acTempPending[m.index] = false; // Hủy pending nhiệt độ cũ vì lệnh nguồn bên dưới đã gửi kèm nhiệt độ mới nhất
-                        applyAcControl(m.index, m.flag, g_acTemp[m.index].load(), false);
+                        g_acTempPending[m.index] = false;
+                        applyAcControl(m.index, m.flag, g_acTemp[m.index].load(), -1, -1, false);
                     }
                     break;
 
                 case AppCmd::AcSetTemp:
                     if (m.index < hmi::kAcCount)
                     {
-                        uint8_t newTemp = static_cast<uint8_t>(constrain(lroundf(m.v[0]), 16, 30));
+                        uint8_t newTemp = static_cast<uint8_t>(constrain(lroundf(m.v[0]), 18, 32));
                         if (g_acTemp[m.index].load() != newTemp)
                         {
                             // Cập nhật ngay UI & biến trạng thái, hoãn gửi ESP-NOW/NVS 450ms để chống kéo liên tục
@@ -271,27 +286,80 @@ namespace
                     }
                     break;
 
+                case AppCmd::AcSetFan:
+                    if (m.index < hmi::kAcCount)
+                    {
+                        uint8_t newFan = static_cast<uint8_t>(constrain(lroundf(m.v[0]), 0, 6));
+                        if (g_acFan[m.index].load() != newFan)
+                        {
+                            g_acFan[m.index] = newFan;
+                            char key[12];
+                            snprintf(key, sizeof(key), "ac_f%u", m.index);
+                            g_prefs.putUChar(key, newFan);
+
+                            hmi::setAcFanSwing(m.index, newFan, g_acSwing[m.index].load());
+
+                            const bool isOn = g_acOn[m.index].load();
+                            if (isOn)
+                            {
+                                espnowSendAcCommand(m.index + 1, true, g_acTemp[m.index].load(),
+                                                    newFan, g_acSwing[m.index].load());
+                            }
+                            storage::logEvent("AC %u fan -> %u (%s)", m.index + 1, newFan, isOn ? "TX" : "SAVED");
+                            g_publishPending = true;
+                        }
+                    }
+                    break;
+
+                case AppCmd::AcSetSwing:
+                    if (m.index < hmi::kAcCount)
+                    {
+                        uint8_t newSwing = m.flag ? 1 : 0;
+                        if (g_acSwing[m.index].load() != newSwing)
+                        {
+                            g_acSwing[m.index] = newSwing;
+                            char key[12];
+                            snprintf(key, sizeof(key), "ac_s%u", m.index);
+                            g_prefs.putUChar(key, newSwing);
+
+                            hmi::setAcFanSwing(m.index, g_acFan[m.index].load(), newSwing);
+
+                            const bool isOn = g_acOn[m.index].load();
+                            if (isOn)
+                            {
+                                espnowSendAcCommand(m.index + 1, true, g_acTemp[m.index].load(),
+                                                    g_acFan[m.index].load(), newSwing);
+                            }
+                            storage::logEvent("AC %u swing -> %u (%s)", m.index + 1, newSwing, isOn ? "TX" : "SAVED");
+                            g_publishPending = true;
+                        }
+                    }
+                    break;
+
                 case AppCmd::AcSetFull:
                     if (m.index < hmi::kAcCount)
                     {
-                        uint8_t newTemp = static_cast<uint8_t>(constrain(lroundf(m.v[0]), 16, 30));
-                        if (g_acOn[m.index].load() == m.flag && g_acTemp[m.index].load() == newTemp)
-                            break;
+                        uint8_t newTemp = static_cast<uint8_t>(constrain(lroundf(m.v[0]), 18, 32));
+                        int8_t newFan = (m.v[1] >= 0.0f) ? static_cast<int8_t>(constrain(lroundf(m.v[1]), 0, 6)) : -1;
+                        int8_t newSwing = (m.v[2] >= 0.0f) ? (lroundf(m.v[2]) ? 1 : 0) : -1;
+
                         g_acLastPowerMs[m.index] = millis();
                         g_acTempPending[m.index] = false;
-                        applyAcControl(m.index, m.flag, newTemp, true);
+                        applyAcControl(m.index, m.flag, newTemp, newFan, newSwing, true);
                     }
                     break;
                 }
             }
 
             const uint32_t now = millis();
-            for (uint8_t i = 0; i < hmi::kAcCount; i++) // chốt giá trị sau khi ngừng kéo thanh trượt
+            for (uint8_t i = 0; i < hmi::kAcCount; i++) // chốt giá trị nhiệt độ sau khi ngừng kéo thanh trượt
             {
                 if (g_acTempPending[i] && (now - g_acTempChangeMs[i] >= kAcTempDebounceMs))
                 {
                     g_acTempPending[i] = false;
                     const uint8_t finalTemp = g_acTemp[i].load();
+                    const uint8_t curFan = g_acFan[i].load();
+                    const uint8_t curSwing = g_acSwing[i].load();
                     const bool isOn = g_acOn[i].load();
 
                     // 1. Lưu Flash NVS 1 lần duy nhất sau khi ngừng thao tác
@@ -299,9 +367,9 @@ namespace
                     snprintf(key, sizeof(key), "ac_t%u", i);
                     g_prefs.putUChar(key, finalTemp);
 
-                    // 2. Chỉ phát gói ESP-NOW sang Slave khi máy lạnh đang BẬT (tránh IR tự kích bật máy đang tắt)
+                    // 2. Chỉ phát gói ESP-NOW sang Slave khi máy lạnh đang BẬT (kèm đúng Fan/Swing hiện tại)
                     if (isOn)
-                        espnowSendAcCommand(i + 1, true, finalTemp);
+                        espnowSendAcCommand(i + 1, true, finalTemp, curFan, curSwing);
 
                     storage::logEvent("AC %u temp -> %uC (%s)", i + 1, finalTemp, isOn ? "TX" : "SAVED");
                     g_publishPending = true;
@@ -309,7 +377,6 @@ namespace
             }
             if (simulate && now - g_bootTime > 1500 && (!lastSim || now - lastSim >= 2000))
             {
-                // No sensor wired yet: random walk until real data arrives on MQTT_TOPIC_SENSOR.
                 if (!lastSim)
                     sensors = SensorValues{26.4f, 62, 412};
                 lastSim = now;
@@ -333,6 +400,32 @@ namespace
     WiFiClient g_wifiClient;
     PubSubClient g_mqtt(g_wifiClient);
 
+    // Chuyển đổi params Fan từ CoreIoT (số 0..6 hoặc chuỗi "Auto"/"Quiet"/"Muc 1".."Muc 5")
+    int8_t parseFanParam(JsonVariantConst v)
+    {
+        if (v.is<int>())
+            return static_cast<int8_t>(constrain(v.as<int>(), 0, 6));
+        if (v.is<const char *>())
+        {
+            const char *s = v.as<const char *>();
+            if (strcasecmp(s, "Auto") == 0)
+                return 0;
+            if (strcasecmp(s, "Quiet") == 0 || strcasecmp(s, "Yen tinh") == 0)
+                return 1;
+            if (strcasecmp(s, "Muc 1") == 0 || strcmp(s, "1") == 0)
+                return 2;
+            if (strcasecmp(s, "Muc 2") == 0 || strcmp(s, "2") == 0)
+                return 3;
+            if (strcasecmp(s, "Muc 3") == 0 || strcmp(s, "3") == 0)
+                return 4;
+            if (strcasecmp(s, "Muc 4") == 0 || strcmp(s, "4") == 0)
+                return 5;
+            if (strcasecmp(s, "Muc 5") == 0 || strcmp(s, "5") == 0)
+                return 6;
+        }
+        return -1;
+    }
+
     void mqttCallback(char *topic, byte *payload, unsigned int length)
     {
         Serial.printf("MQTT [%s]: %.*s\n", topic, length, (const char *)payload);
@@ -343,7 +436,6 @@ namespace
         AppMsg m{};
         if (strcmp(topic, "v1/devices/me/telemetry") == 0)
         {
-            // {"primary":26.4,"metric1":62,"metric2":412}  or  {"error":true}
             m.cmd = AppCmd::Sensors;
             m.flag = doc["error"] | false;
             m.v[0] = doc["primary"].is<float>() ? doc["primary"].as<float>() : NAN;
@@ -354,15 +446,14 @@ namespace
         }
         if (strncmp(topic, "v1/devices/me/rpc/request/", 26) != 0)
             return;
-        // Kiểm tra xem JSON có chứa trường "method" không
+
         if (doc["method"].is<const char *>())
         {
             const char *method = doc["method"];
-            bool state = doc["params"] | false; // Lấy trạng thái On/Off
+            bool state = doc["params"] | false;
 
             if (strcmp(method, "setLight") == 0)
             {
-                // Giả sử Đèn được đấu vào Relay 0
                 m.cmd = AppCmd::RelaySet;
                 m.index = 0;
                 m.flag = state;
@@ -372,22 +463,39 @@ namespace
             else if (strncmp(method, "setAC", 5) == 0 && method[5] >= '1' && method[5] <= '3')
             {
                 const uint8_t idx = static_cast<uint8_t>(method[5] - '1'); // '1'..'3' -> 0..2
-                if (strcmp(method + 6, "Temp") == 0)
+                const char *sub = method + 6;
+
+                if (strcmp(sub, "Temp") == 0)
                 {
-                    // RPC dạng "setAC1Temp" với params là số (vd: 24)
+                    // RPC "setAC1Temp" -> params: 18..32
                     float t = doc["params"].as<float>();
-                    if (t >= 16.0f && t <= 30.0f)
+                    if (t >= 18.0f && t <= 32.0f)
                         postApp(AppMsg{AppCmd::AcSetTemp, idx, false, {t, 0, 0}, {}});
                 }
-                else if (method[6] == '\0')
+                else if (strcmp(sub, "Fan") == 0)
                 {
-                    // RPC dạng "setAC1" với params là bool hoặc {"power":true,"temp":24}
+                    // RPC "setAC1Fan" -> params: 0..6 hoặc "Auto"/"Quiet"/"Muc 1".."Muc 5"
+                    int8_t f = parseFanParam(doc["params"]);
+                    if (f >= 0)
+                        postApp(AppMsg{AppCmd::AcSetFan, idx, false, {static_cast<float>(f), 0, 0}, {}});
+                }
+                else if (strcmp(sub, "Swing") == 0)
+                {
+                    // RPC "setAC1Swing" -> params: true/false hoặc 1/0
+                    bool sw = doc["params"].is<bool>() ? doc["params"].as<bool>() : (doc["params"].as<int>() != 0);
+                    postApp(AppMsg{AppCmd::AcSetSwing, idx, sw, {}, {}});
+                }
+                else if (*sub == '\0')
+                {
+                    // RPC "setAC1" -> params: bool hoặc {"power":true,"temp":24,"fan":2,"swing":true}
                     if (doc["params"].is<JsonObject>())
                     {
-                        JsonObject p = doc["params"];
-                        bool pwr = p["power"] | g_acOn[idx].load();
+                        JsonObjectConst p = doc["params"].as<JsonObjectConst>();
+                        bool pwr = p["power"].is<bool>() ? p["power"].as<bool>() : g_acOn[idx].load();
                         float t = p["temp"].is<float>() ? p["temp"].as<float>() : static_cast<float>(g_acTemp[idx].load());
-                        postApp(AppMsg{AppCmd::AcSetFull, idx, pwr, {t, 0, 0}, {}});
+                        float f = p["fan"].isNull() ? -1.0f : static_cast<float>(parseFanParam(p["fan"]));
+                        float sw = p["swing"].isNull() ? -1.0f : ((p["swing"].is<bool>() ? p["swing"].as<bool>() : (p["swing"].as<int>() != 0)) ? 1.0f : 0.0f);
+                        postApp(AppMsg{AppCmd::AcSetFull, idx, pwr, {t, f, sw}, {}});
                     }
                     else
                     {
@@ -407,7 +515,6 @@ namespace
         }
         else if (doc["brightness"].is<int>())
         {
-            // 0-255 for backwards compatibility; the HMI works in percent.
             hmi::setBrightness(map(doc["brightness"].as<int>(), 0, 255, 0, 100));
         }
     }
@@ -426,8 +533,9 @@ namespace
         doc["min_free_heap"] = g_minFreeHeap.load();
         doc["wifi_rssi"] = WiFi.RSSI();
         doc["ip"] = WiFi.localIP().toString();
-        doc["temperature"] = g_currentTemp; // Đẩy nhiệt độ vào JSON
-        doc["humidity"] = g_currentHum;     // Đẩy độ ẩm vào JSON
+        doc["temperature"] = g_currentTemp;
+        doc["humidity"] = g_currentHum;
+
         JsonArray relays = doc["relays"].to<JsonArray>();
         for (int i = 0; i < RELAY_COUNT; i++)
         {
@@ -436,14 +544,22 @@ namespace
             r["state"] = g_relay[i].load();
             r["last_change"] = (millis() - g_relayChange[i]) / 1000;
         }
-        for (uint8_t i = 0; i < hmi::kAcCount; i++) // Thêm trạng thái 3 máy lạnh lên coreIOT mỗi khi có sự thay đổi
+
+        // Đẩy trạng thái đầy đủ 3 máy lạnh (Power, Temp, Fan, Swing) lên CoreIoT
+        for (uint8_t i = 0; i < hmi::kAcCount; i++)
         {
-            char kPwr[16], kTmp[16];
+            char kPwr[16], kTmp[16], kFan[16], kSwg[16];
             snprintf(kPwr, sizeof(kPwr), "ac%u_power", i + 1);
             snprintf(kTmp, sizeof(kTmp), "ac%u_temp", i + 1);
+            snprintf(kFan, sizeof(kFan), "ac%u_fan", i + 1);
+            snprintf(kSwg, sizeof(kSwg), "ac%u_swing", i + 1);
+
             doc[kPwr] = g_acOn[i].load();
             doc[kTmp] = g_acTemp[i].load();
+            doc[kFan] = g_acFan[i].load();
+            doc[kSwg] = g_acSwing[i].load() != 0;
         }
+
         String out;
         serializeJson(doc, out);
         g_mqtt.publish("v1/devices/me/telemetry", out.c_str(), true);
@@ -552,8 +668,6 @@ namespace
         info.cores = ESP.getChipCores();
         info.cpuMHz = ESP.getCpuFreqMHz();
         strlcpy(info.sdk, ESP.getSdkVersion(), sizeof(info.sdk));
-        // RSSI and heap can vary every second. The Settings page only needs a
-        // human-readable refresh every few seconds; avoid repeated layout work.
         if (!lastSystemInfo || now - lastSystemInfo >= 5000)
         {
             lastSystemInfo = now;
@@ -569,7 +683,7 @@ namespace
         m.v[0] = temp;
         m.v[1] = hum;
         m.v[2] = power;
-        postApp(m); // Đóng gói 3 thông số temp, hum, power vào struct appMsg rồi đẩy vào hàng đợi g_appQ thông qua lệnh postApp(m)
+        postApp(m);
     }
 
     void netTask(void *)
@@ -603,7 +717,6 @@ namespace
                 wasUp = up;
                 if (up)
                 {
-                    //esp_wifi_set_ps(WIFI_PS_NONE);
                     storage::logEvent("Wi-Fi connected: %s %s RSSI %d", WiFi.SSID().c_str(),
                                       WiFi.localIP().toString().c_str(), WiFi.RSSI());
                     configTime(HMI_TZ_OFFSET_SECONDS, 0, "pool.ntp.org", "time.google.com");
@@ -647,9 +760,6 @@ namespace
         }
     }
 
-    // "shot" (tools/screenshot.py), "shot sd", "info"/"tasks", "toggle <1..3>",
-    // "page <0..3>", "scroll <px>", "drag x y0 y1 [ms]", "devices", "wifi" (open + scan), "theme <0..2>",
-    // "sensor ok|warn|error|loading|stale|sim", "bench [psram|hybrid]" (UI build/redraw timing).
     void consoleTask(void *)
     {
         char line[80];
@@ -671,14 +781,13 @@ namespace
                     continue;
                 if (strcmp(line, "shot") == 0)
                 {
-                    // Core log_x() from other tasks would corrupt the binary stream.
                     Serial.setDebugOutput(false);
                     hmi::screenshot(Serial);
                     Serial.flush();
                     Serial.setDebugOutput(true);
                 }
                 else if (strncmp(line, "shot fb", 7) == 0)
-                { // "shot fb [ms]": real framebuffer
+                {
                     Serial.setDebugOutput(false);
                     hmi::screenshotFramebuffer(Serial, line[7] ? atoi(line + 8) : 0);
                     Serial.flush();
@@ -722,7 +831,7 @@ namespace
                 }
                 else if (strncmp(line, "drag ", 5) == 0)
                 {
-                    int x = 240, y0 = 300, y1 = 120, ms = 300; // "drag x y0 y1 [ms]"
+                    int x = 240, y0 = 300, y1 = 120, ms = 300;
                     sscanf(line + 5, "%d %d %d %d", &x, &y0, &y1, &ms);
                     hmi::injectDrag(x, y0, y1, ms);
                 }
@@ -732,15 +841,14 @@ namespace
                 }
                 else if (strncmp(line, "bench", 5) == 0)
                 {
-                    hmi::benchmark(strstr(line, "psram") ? 1 : strstr(line, "hybrid") ? 2
-                                                                                      : 0);
+                    hmi::benchmark(strstr(line, "psram") ? 1 : strstr(line, "hybrid") ? 2 : 0);
                 }
                 else if (strncmp(line, "view ", 5) == 0)
                 {
                     hmi::previewFile(line + 5);
                 }
                 else if (strncmp(line, "kbd", 3) == 0)
-                { // "kbd" secured, "kbd open" open network
+                {
                     hmi::previewKeyboard(strstr(line, "open") != nullptr);
                 }
                 else if (strcmp(line, "devices") == 0)
@@ -752,13 +860,13 @@ namespace
                     wifimgr::retry11b(line + 9);
                 }
                 else if (strncmp(line, "wifi mac ", 9) == 0)
-                { // "wifi mac <ssid>": retry with another MAC
+                {
                     wifimgr::retryWithNewMac(line + 9);
                 }
-                else if (strcmp(line, "nodes") == 0) // Hiển thị 3 slave đang online kèm địa chỉ MAC
+                else if (strcmp(line, "nodes") == 0)
                     espnowPrintNodes(Serial);
                 else if (strncmp(line, "wifi bssid ", 11) == 0)
-                { // "wifi bssid aa:bb:cc:dd:ee:ff <ch> <ssid>"
+                {
                     unsigned b[6];
                     int ch = 0, off = 0;
                     if (sscanf(line + 11, "%x:%x:%x:%x:%x:%x %d %n", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5], &ch, &off) >= 7)
@@ -768,10 +876,10 @@ namespace
                     }
                 }
                 else if (strncmp(line, "wifi join ", 10) == 0)
-                { // saved network, stored password
+                {
                     NetMsg m{NetCmd::Join, {}, {}};
                     strlcpy(m.ssid, line + 10, sizeof(m.ssid));
-                    strlcpy(m.pass, wifimgr::kUseSaved, sizeof(m.pass)); // ignored if the scan saw it open
+                    strlcpy(m.pass, wifimgr::kUseSaved, sizeof(m.pass));
                     postNet(m);
                 }
                 else if (strcmp(line, "wifi") == 0)
@@ -791,15 +899,21 @@ namespace
                 }
                 else if (strncmp(line, "ac ", 3) == 0)
                 {
-                    int id = 1, pwr = 1, temp = -1;
-                    int n = sscanf(line + 3, "%d %d %d", &id, &pwr, &temp);
+                    // Cú pháp Serial test: "ac <id> <pwr> [temp] [fan] [swing]"
+                    int id = 1, pwr = 1, temp = -1, fan = -1, swing = -1;
+                    int n = sscanf(line + 3, "%d %d %d %d %d", &id, &pwr, &temp, &fan, &swing);
                     if (n >= 2 && id >= 1 && id <= hmi::kAcCount)
                     {
                         const uint8_t idx = static_cast<uint8_t>(id - 1);
                         if (n >= 3)
-                            postApp(AppMsg{AppCmd::AcSetFull, idx, pwr != 0, {static_cast<float>(temp), 0, 0}, {}});
+                        {
+                            postApp(AppMsg{AppCmd::AcSetFull, idx, pwr != 0,
+                                           {static_cast<float>(temp), static_cast<float>(fan), static_cast<float>(swing)}, {}});
+                        }
                         else
+                        {
                             postApp(AppMsg{AppCmd::AcSetPower, idx, pwr != 0, {}, {}});
+                        }
                     }
                 }
                 else
@@ -817,8 +931,16 @@ namespace
     void onAcToggle(uint8_t i, bool on) { postApp(AppMsg{AppCmd::AcSetPower, i, on, {}, {}}); }
     void onAcTemp(uint8_t i, uint8_t rawTemp)
     {
-        const float tempC = static_cast<float>(rawTemp) / 2.0f; // slider 32..60 -> 16.0..30.0°C
+        const float tempC = static_cast<float>(rawTemp) / 2.0f; // slider 36..64 -> 18.0..32.0°C
         postApp(AppMsg{AppCmd::AcSetTemp, i, false, {tempC, 0, 0}, {}});
+    }
+    void onAcFan(uint8_t i, uint8_t fan)
+    {
+        postApp(AppMsg{AppCmd::AcSetFan, i, false, {static_cast<float>(fan), 0, 0}, {}});
+    }
+    void onAcSwing(uint8_t i, uint8_t swing)
+    {
+        postApp(AppMsg{AppCmd::AcSetSwing, i, swing != 0, {}, {}});
     }
     void onBrightnessChanged(uint8_t pct) { postApp(AppMsg{AppCmd::SaveBrightness, pct, false, {}, {}}); }
     void onAutoDimChanged(bool on) { postApp(AppMsg{AppCmd::SaveAutoDim, 0, on, {}, {}}); }
@@ -842,34 +964,9 @@ namespace
     void onFileRead(const char *path) { storage::requestRead(path); }
     void onFileDelete(const char *path) { storage::requestDelete(path); }
 
-    // Tasmota devices: /config.json "tasmota" if present, else config.h.
     uint8_t deviceList(hmi::DeviceInfo *out)
     {
-        // if (g_sdConfig.tasmotaCount)
-        // {
-        //     memcpy(out, g_sdConfig.tasmota, sizeof(hmi::DeviceInfo) * g_sdConfig.tasmotaCount);
-        //     return g_sdConfig.tasmotaCount;
-        // }
-        // const struct
-        // {
-        //     const char *name;
-        //     const char *key;
-        //     uint8_t channels;
-        // } defaults[] = {
-        //     {TASMOTA_1_NAME, TASMOTA_1_KEY, TASMOTA_1_CHANNELS},
-        //     {TASMOTA_2_NAME, TASMOTA_2_KEY, TASMOTA_2_CHANNELS},
-        // };
-        // uint8_t n = 0;
-        // for (const auto &d : defaults)
-        // {
-        //     out[n] = hmi::DeviceInfo{};
-        //     strlcpy(out[n].name, d.name, sizeof(out[n].name));
-        //     strlcpy(out[n].key, d.key, sizeof(out[n].key));
-        //     out[n].channels = d.channels;
-        //     n++;
-        // }
-        // return n;
-
+        (void)out;
         return 0;
     }
 
@@ -881,57 +978,48 @@ void setup()
     delay(100);
     Serial.println("\n\n=== ESP32-4848S040 Smart Home Panel ===");
     Serial.printf("Firmware: %s  Hardware: %s\n", FIRMWARE_VERSION, HARDWARE_VERSION);
-    Serial.printf("Reset reason: %d\n", (int)esp_reset_reason()); // 1=power-on/EN, 4=panic, 6/7=watchdog, 9=brownout
+    Serial.printf("Reset reason: %d\n", (int)esp_reset_reason());
     g_bootTime = millis();
 
     for (int i = 0; i < RELAY_COUNT; i++)
     {
         pinMode(kRelayPins[i], OUTPUT);
-        digitalWrite(kRelayPins[i], LOW); // Active HIGH relay, OFF = LOW
+        digitalWrite(kRelayPins[i], LOW);
         g_relay[i] = false;
         g_relayChange[i] = millis();
     }
 
     if (!display.begin())
         Serial.println("!!! display.begin() FAILED !!!");
-    // Backlight: Light_PWM attached GPIO38 to an LEDC channel in begin().  Do
-    // not pinMode()/digitalWrite() it afterwards: that detaches the pin from
-    // LEDC, leaves it stuck at 100 % and the brightness slider does nothing.
-    display.setBrightness(255); // until the saved level arrives via the UI
+    display.setBrightness(255);
 
-    // PSRAM history/event rings first: storage::begin() restores into them.
     datalog::begin();
-    // SD after the display: SCK/MOSI are shared with the ST7701 init bus.
-    //storage::begin();
-    //storage::logEvent("Boot fw=%s reset=%d", FIRMWARE_VERSION, (int)esp_reset_reason());
-    /*if (storage::loadConfig(g_sdConfig))
-    {
-        if (g_sdConfig.mqttHost[0])
-            strlcpy(g_mqttHost, g_sdConfig.mqttHost, sizeof(g_mqttHost));
-        if (g_sdConfig.mqttPort)
-            g_mqttPort = g_sdConfig.mqttPort;
-        if (g_sdConfig.mqttUser[0])
-            strlcpy(g_mqttUser, g_sdConfig.mqttUser, sizeof(g_mqttUser));
-        if (g_sdConfig.mqttPass[0])
-            strlcpy(g_mqttPass, g_sdConfig.mqttPass, sizeof(g_mqttPass));
-        hmi::setRoomName(g_sdConfig.room);
-    }*/
 
     g_prefs.begin("hmi", false);
     for (uint8_t i = 0; i < hmi::kAcCount; i++)
     {
         char key[12];
         snprintf(key, sizeof(key), "ac_t%u", i);
-        uint8_t savedTemp = constrain(g_prefs.getUChar(key, 27), 16, 30);
+        uint8_t savedTemp = constrain(g_prefs.getUChar(key, 27), 18, 32);
+
+        snprintf(key, sizeof(key), "ac_f%u", i);
+        uint8_t savedFan = constrain(g_prefs.getUChar(key, 1), 0, 6); // Mặc định 1 (Yên tĩnh)
+
+        snprintf(key, sizeof(key), "ac_s%u", i);
+        uint8_t savedSwing = g_prefs.getUChar(key, 0) ? 1 : 0; // Mặc định 0 (Off)
+
         g_acOn[i] = false;
         g_acTemp[i] = savedTemp;
+        g_acFan[i] = savedFan;
+        g_acSwing[i] = savedSwing;
+
         hmi::setAc(i, false, static_cast<float>(savedTemp));
+        hmi::setAcFanSwing(i, savedFan, savedSwing);
     }
     hmi::setBrightness(g_prefs.getUChar("bright", 80));
     hmi::setAutoDim(g_prefs.getBool("autodim", true));
     hmi::setTheme(g_prefs.getUChar("theme", 0));
 
-    // Make the task watchdog fatal (10 s): a hung ui/app task reboots instead of freezing.
     esp_task_wdt_init(10, true);
 
     g_appQ = xQueueCreate(16, sizeof(AppMsg));
@@ -941,6 +1029,8 @@ void setup()
     cb.relayToggle = onRelayToggle;
     cb.acToggle = onAcToggle;
     cb.acTemp = onAcTemp;
+    cb.acFan = onAcFan;
+    cb.acSwing = onAcSwing;
     cb.brightnessChanged = onBrightnessChanged;
     cb.autoDimChanged = onAutoDimChanged;
     cb.themeChanged = onThemeChanged;
@@ -952,18 +1042,16 @@ void setup()
     cb.fileList = onFileList;
     cb.fileRead = onFileRead;
     cb.fileDelete = onFileDelete;
+
     static hmi::DeviceInfo devices[hmi::kMaxDevices];
     const uint8_t deviceCount = deviceList(devices);
-    hmi::configureDevices(devices, deviceCount); // the Control page is built for these
-    hmi::begin(display, cb);                     // "ui" task, core 1
-    // tasmota::start(devices, deviceCount, g_sdConfig.hasTasmotaApi ? g_sdConfig.tasmotaApi : TASMOTA_API_URL);
+    hmi::configureDevices(devices, deviceCount);
+    hmi::begin(display, cb);
 
-    //storage::start();
     xTaskCreatePinnedToCore(appTask, "app", 4 * 1024, nullptr, 4, nullptr, 1);
     xTaskCreatePinnedToCore(netTask, "net", 8 * 1024, nullptr, 2, nullptr, 0);
     xTaskCreatePinnedToCore(consoleTask, "console", 4 * 1024, nullptr, 1, nullptr, 0);
     Serial.println("Tasks started: ui app net devices storage console");
 }
 
-// Everything runs in dedicated tasks; free the Arduino loop task.
 void loop() { vTaskDelete(nullptr); }

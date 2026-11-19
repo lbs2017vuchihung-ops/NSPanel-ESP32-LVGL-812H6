@@ -91,10 +91,6 @@ namespace hmi
             lv_obj_t *slider;
             lv_obj_t *sliderValue;
             // settings
-            // 3 biến thanh trượt và 3 chữ nhiệt độ máy lạnh
-            //lv_obj_t *acSlider[3];
-            //lv_obj_t *acLabel[3];
-
             lv_obj_t *dimSwitch;
             lv_obj_t *sysWifi;
             lv_obj_t *sysMqtt;
@@ -160,16 +156,40 @@ namespace hmi
             uint8_t saverStep;
             bool dimmed = false;
 
-            // Trong struct Ui (cùng nhóm với relaySwitch / slider):
+            // Điều khiển 3 máy lạnh (Bật/Tắt + Nhiệt độ, Quạt, Đảo gió)
             lv_obj_t *acSwitch[kAcCount] = {};
-            lv_obj_t *acTempRow[kAcCount] = {};
+            lv_obj_t *acControls[kAcCount] = {};
             lv_obj_t *acSlider[kAcCount] = {};
             lv_obj_t *acTempLabel[kAcCount] = {};
+            lv_obj_t *acFanSlider[kAcCount] = {};
+            lv_obj_t *acFanLabel[kAcCount] = {};
+            lv_obj_t *acSwingSwitch[kAcCount] = {};
         };
         Ui ui;
         // Copy of the model taken under ModelLock at the start of every UI tick.  All
         // widget code and event callbacks read this, never the shared model.
         Model &s_snap = newModel();
+
+        constexpr const char *kAcFanNames[] = {"Auto", "Yên tĩnh", "Mức 1", "Mức 2", "Mức 3", "Mức 4", "Mức 5"};
+        uint8_t s_acFan[kAcCount] = {1, 1, 1};   // Mặc định 1 (Yên tĩnh)
+        uint8_t s_acSwing[kAcCount] = {0, 0, 0}; // Mặc định 0 (Tắt)
+
+        void styleAcSlider(lv_obj_t *sld)
+        {
+            lv_obj_remove_style_all(sld);
+            lv_obj_set_size(sld, 400, 8);
+            lv_obj_set_ext_click_area(sld, 16);
+            lv_obj_set_style_bg_opa(sld, LV_OPA_COVER, LV_PART_MAIN);
+            lv_obj_set_style_bg_color(sld, elevated(), LV_PART_MAIN);
+            lv_obj_set_style_radius(sld, 4, LV_PART_MAIN);
+            lv_obj_set_style_bg_opa(sld, LV_OPA_COVER, LV_PART_INDICATOR);
+            lv_obj_set_style_bg_color(sld, info(), LV_PART_INDICATOR);
+            lv_obj_set_style_radius(sld, 4, LV_PART_INDICATOR);
+            lv_obj_set_style_bg_opa(sld, LV_OPA_COVER, LV_PART_KNOB);
+            lv_obj_set_style_bg_color(sld, text(), LV_PART_KNOB);
+            lv_obj_set_style_radius(sld, LV_RADIUS_CIRCLE, LV_PART_KNOB);
+            lv_obj_set_style_pad_all(sld, 9, LV_PART_KNOB);
+        }
 
         void applySystem(const Model &m);
         void applyWifiList(const Model &m);
@@ -686,51 +706,6 @@ namespace hmi
             return r;
         }
 
-        // void buildControl(lv_obj_t* page) {
-        //     makeScrollPage(page);
-
-        //     sectionTitle(page, "RELAY TRÊN PANEL");
-        //     lv_obj_t* local = settingsCard(page);
-        //     for (int i = 0; i < RELAY_COUNT; i++) {
-        //         lv_obj_t* r = switchRow(local, kRelayIcons[i], kRelayNames[i], i == RELAY_COUNT - 1,
-        //                                 &ui.relayIcon[i], &ui.relayStatus[i], &ui.relaySwitch[i]);
-        //         lv_obj_add_event_cb(r, [](lv_event_t* e) {
-        //             const auto idx = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
-        //             if (ui.cb.relayToggle) ui.cb.relayToggle(idx);
-        //         }, LV_EVENT_CLICKED, reinterpret_cast<void*>(static_cast<uintptr_t>(i)));
-        //     }
-
-        //     // One group per Tasmota device: title + online state, then its channels.
-        //     for (uint8_t d = 0; d < s_snap.deviceCount; d++) {
-        //         const DeviceInfo& dev = s_snap.devices[d];
-        //         lv_obj_t* head = box(page);
-        //         lv_obj_set_size(head, LV_PCT(100), LV_SIZE_CONTENT);
-        //         lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
-        //         lv_obj_set_flex_align(head, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
-        //         char title[32];
-        //         snprintf(title, sizeof(title), "%s", dev.name);
-        //         for (char* c = title; *c; c++) *c = toupper(static_cast<unsigned char>(*c));  // ASCII names
-        //         lv_obj_t* t = sectionTitle(head, title);
-        //         lv_obj_set_flex_grow(t, 1);
-        //         ui.devStatus[d] = label(head, &hmi_font_12_sb, muted(), "Đang kết nối…");
-        //         lv_obj_set_style_pad_right(ui.devStatus[d], 4, 0);
-
-        //         lv_obj_t* card = settingsCard(page);
-        //         for (uint8_t c = 0; c < dev.channels && c < kMaxChannels; c++) {
-        //             char name[24];
-        //             if (dev.labels[c][0]) strlcpy(name, dev.labels[c], sizeof(name));
-        //             else snprintf(name, sizeof(name), "Kênh %u", c + 1);
-        //             lv_obj_t* r = switchRow(card, ICON_PLUG_ZAP, name, c + 1 == dev.channels,
-        //                                     &ui.devIcon[d][c], &ui.devSub[d][c], &ui.devSwitch[d][c]);
-        //             ui.devRow[d][c] = r;
-        //             lv_obj_add_event_cb(r, [](lv_event_t* e) {
-        //                 const auto v = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
-        //                 if (ui.cb.deviceToggle) ui.cb.deviceToggle(v >> 4, v & 0x0F);
-        //             }, LV_EVENT_CLICKED, reinterpret_cast<void*>(static_cast<uintptr_t>((d << 4) | c)));
-        //         }
-        //     }
-        // }
-
         void buildControl(lv_obj_t *page)
         {
             makeScrollPage(page);
@@ -756,11 +731,11 @@ namespace hmi
 
                 lv_obj_add_event_cb(r, [](lv_event_t *e)
                                     {
-            const auto idx = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
-            if (ui.cb.relayToggle) ui.cb.relayToggle(idx); }, LV_EVENT_CLICKED, reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
+                    const auto idx = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
+                    if (ui.cb.relayToggle) ui.cb.relayToggle(idx); }, LV_EVENT_CLICKED, reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
             }
 
-            // --- GIAO DIỆN 3 MÁY LẠNH ---
+            // --- GIAO DIỆN 3 MÁY LẠNH (COOL: NHIỆT ĐỘ, FAN, SWING) ---
             sectionTitle(page, "ĐIỀU KHIỂN MÁY LẠNH");
             lv_obj_t *acCard = settingsCard(page);
 
@@ -787,7 +762,7 @@ namespace hmi
                 lv_obj_t *t = label(r, &hmi_font_14_m, text(), name);
                 lv_obj_set_pos(t, 32, 16);
 
-                // --- 1. CÔNG TẮC ---
+                // --- 1. CÔNG TẮC BẬT/TẮT ---
                 ui.acSwitch[i] = lv_switch_create(r);
                 lv_obj_align(ui.acSwitch[i], LV_ALIGN_TOP_RIGHT, 0, 12);
                 lv_obj_set_style_bg_color(ui.acSwitch[i], lv_color_hex(0x404040), LV_PART_MAIN);
@@ -795,82 +770,124 @@ namespace hmi
                 lv_obj_set_style_bg_color(ui.acSwitch[i], info(), LV_PART_INDICATOR | LV_STATE_CHECKED);
                 lv_obj_set_style_bg_color(ui.acSwitch[i], lv_color_hex(0xFFFFFF), LV_PART_KNOB | LV_STATE_CHECKED);
 
-                // --- 2. THANH TRƯỢT ---
-                ui.acTempRow[i] = lv_obj_create(r);
-                lv_obj_remove_style_all(ui.acTempRow[i]);
-                lv_obj_set_size(ui.acTempRow[i], LV_PCT(100), 40);
-                lv_obj_set_pos(ui.acTempRow[i], 0, 54);
-                lv_obj_add_flag(ui.acTempRow[i], LV_OBJ_FLAG_HIDDEN);
+                // --- 2. KHUNG CHỨA ĐIỀU CHỈNH (ẨN KHI TẮT) ---
+                ui.acControls[i] = box(r);
+                lv_obj_set_size(ui.acControls[i], LV_PCT(100), 152);
+                lv_obj_set_pos(ui.acControls[i], 0, 54);
+                lv_obj_add_flag(ui.acControls[i], LV_OBJ_FLAG_HIDDEN);
 
-                // Chữ hiển thị (Mặc định 27.0°C)
-                ui.acTempLabel[i] = label(ui.acTempRow[i], &hmi_font_14_m, muted(), "27.0°C");
-                lv_obj_align(ui.acTempLabel[i], LV_ALIGN_TOP_RIGHT, 0, 0);
+                // === MỤC 1: NHIỆT ĐỘ (18°C - 32°C, SỐ NGUYÊN) ===
+                lv_obj_t *lblTempTitle = label(ui.acControls[i], &hmi_font_13_r, muted(), "Nhiệt độ");
+                lv_obj_set_pos(lblTempTitle, 0, 2);
 
-                ui.acSlider[i] = lv_slider_create(ui.acTempRow[i]);
-                lv_obj_remove_style_all(ui.acSlider[i]);
-                lv_obj_set_size(ui.acSlider[i], 400, 8);
-                lv_obj_align(ui.acSlider[i], LV_ALIGN_BOTTOM_MID, 0, -10);
-                lv_slider_set_range(ui.acSlider[i], 32, 60);
-                lv_slider_set_value(ui.acSlider[i], 54, LV_ANIM_OFF);
-                lv_obj_set_ext_click_area(ui.acSlider[i], 20);
+                ui.acTempLabel[i] = label(ui.acControls[i], &hmi_font_14_m, text(), "27°C");
+                lv_obj_align(ui.acTempLabel[i], LV_ALIGN_TOP_RIGHT, 0, 2);
 
-                // Màu sắc thanh trượt
-                lv_obj_set_style_bg_opa(ui.acSlider[i], LV_OPA_COVER, LV_PART_MAIN);
-                lv_obj_set_style_bg_color(ui.acSlider[i], elevated(), LV_PART_MAIN);
-                lv_obj_set_style_radius(ui.acSlider[i], 4, LV_PART_MAIN);
-                lv_obj_set_style_bg_opa(ui.acSlider[i], LV_OPA_COVER, LV_PART_INDICATOR);
-                lv_obj_set_style_bg_color(ui.acSlider[i], info(), LV_PART_INDICATOR);
-                lv_obj_set_style_radius(ui.acSlider[i], 4, LV_PART_INDICATOR);
-                lv_obj_set_style_bg_opa(ui.acSlider[i], LV_OPA_COVER, LV_PART_KNOB);
-                lv_obj_set_style_bg_color(ui.acSlider[i], text(), LV_PART_KNOB);
-                lv_obj_set_style_radius(ui.acSlider[i], LV_RADIUS_CIRCLE, LV_PART_KNOB);
-                lv_obj_set_style_pad_all(ui.acSlider[i], 10, LV_PART_KNOB);
+                ui.acSlider[i] = lv_slider_create(ui.acControls[i]);
+                styleAcSlider(ui.acSlider[i]);
+                lv_obj_align(ui.acSlider[i], LV_ALIGN_TOP_MID, 0, 28);
+                lv_slider_set_range(ui.acSlider[i], 18, 32);
+                lv_slider_set_value(ui.acSlider[i], 27, LV_ANIM_OFF);
 
-                // --- 3. XỬ LÝ SỰ KIỆN KÉO THANH TRƯỢT ---
                 lv_obj_add_event_cb(ui.acSlider[i], [](lv_event_t *e)
                                     {
-            auto *slider = static_cast<lv_obj_t *>(lv_event_get_target(e));
-            const auto idx = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
-            if (!ui.acTempLabel[idx]) return;
+                    auto *slider = static_cast<lv_obj_t *>(lv_event_get_target(e));
+                    const auto idx = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
+                    if (!ui.acTempLabel[idx]) return;
 
-            const int val = static_cast<int>(lv_slider_get_value(slider));
-            lv_label_set_text_fmt(ui.acTempLabel[idx], "%d.%d°C", val / 2, (val % 2) * 5);
+                    const int deg = static_cast<int>(lv_slider_get_value(slider));
+                    lv_label_set_text_fmt(ui.acTempLabel[idx], "%d°C", deg);
 
-            // Gửi giá trị thanh trượt (32..60) về appTask -> debounce 450ms -> bắn ESP-NOW
-            if (ui.cb.acTemp)
-            {
-                ui.cb.acTemp(idx, static_cast<uint8_t>(val));
-            } }, LV_EVENT_VALUE_CHANGED, idxPtr);
+                    // Nhân 2 (36..64) để giữ tương thích chuẩn 0.5°C/đơn vị với appTask & ESP-NOW
+                    if (ui.cb.acTemp)
+                    {
+                        ui.cb.acTemp(idx, static_cast<uint8_t>(deg * 2));
+                    } }, LV_EVENT_VALUE_CHANGED, idxPtr);
 
-                // --- 4. SỰ KIỆN GẠT CÔNG TẮC BẬT/TẮT MÁY LẠNH ---
+                // === MỤC 2: QUẠT / FAN (0=Auto, 1=Yên tĩnh, 2=Yếu, 3=Trung bình, 4=Cao, 5=Tối đa) ===
+                lv_obj_t *lblFanTitle = label(ui.acControls[i], &hmi_font_13_r, muted(), "Quạt (FAN)");
+                lv_obj_set_pos(lblFanTitle, 0, 58);
+
+                ui.acFanLabel[i] = label(ui.acControls[i], &hmi_font_14_m, text(), kAcFanNames[s_acFan[i]]);
+                lv_obj_align(ui.acFanLabel[i], LV_ALIGN_TOP_RIGHT, 0, 58);
+
+                ui.acFanSlider[i] = lv_slider_create(ui.acControls[i]);
+                styleAcSlider(ui.acFanSlider[i]);
+                lv_obj_align(ui.acFanSlider[i], LV_ALIGN_TOP_MID, 0, 84);
+                lv_slider_set_range(ui.acFanSlider[i], 0, 6);
+                lv_slider_set_value(ui.acFanSlider[i], s_acFan[i], LV_ANIM_OFF);
+
+                lv_obj_add_event_cb(ui.acFanSlider[i], [](lv_event_t *e)
+                                    {
+                    const lv_event_code_t code = lv_event_get_code(e);
+                    if (code != LV_EVENT_VALUE_CHANGED && code != LV_EVENT_RELEASED) return;
+
+                    auto *slider = static_cast<lv_obj_t *>(lv_event_get_target(e));
+                    const auto idx = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
+                    if (!ui.acFanLabel[idx]) return;
+
+                    const uint8_t val = static_cast<uint8_t>(lv_slider_get_value(slider));
+                    s_acFan[idx] = val;
+                    lv_label_set_text(ui.acFanLabel[idx], kAcFanNames[val]);
+
+                    if (code == LV_EVENT_RELEASED && ui.cb.acFan)
+                    {
+                        ui.cb.acFan(idx, val);
+                    } }, LV_EVENT_ALL, idxPtr);
+
+                // === MỤC 3: ĐẢO GIÓ / SWING (NÚT BẬT / TẮT) ===
+                lv_obj_t *lblSwingTitle = label(ui.acControls[i], &hmi_font_13_r, muted(), "Đảo gió (Swing)");
+                lv_obj_set_pos(lblSwingTitle, 0, 116);
+
+                ui.acSwingSwitch[i] = lv_switch_create(ui.acControls[i]);
+                lv_obj_align(ui.acSwingSwitch[i], LV_ALIGN_TOP_RIGHT, 0, 110);
+                lv_obj_set_style_bg_color(ui.acSwingSwitch[i], lv_color_hex(0x404040), LV_PART_MAIN);
+                lv_obj_set_style_bg_color(ui.acSwingSwitch[i], lv_color_hex(0xB0B0B0), LV_PART_KNOB);
+                lv_obj_set_style_bg_color(ui.acSwingSwitch[i], info(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+                lv_obj_set_style_bg_color(ui.acSwingSwitch[i], lv_color_hex(0xFFFFFF), LV_PART_KNOB | LV_STATE_CHECKED);
+                setChecked(ui.acSwingSwitch[i], s_acSwing[i] != 0);
+
+                lv_obj_add_event_cb(ui.acSwingSwitch[i], [](lv_event_t *e)
+                                    {
+                    auto *sw = static_cast<lv_obj_t *>(lv_event_get_target(e));
+                    const auto idx = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
+                    const uint8_t val = lv_obj_has_state(sw, LV_STATE_CHECKED) ? 1 : 0;
+                    s_acSwing[idx] = val;
+
+                    if (ui.cb.acSwing)
+                    {
+                        ui.cb.acSwing(idx, val);
+                    } }, LV_EVENT_VALUE_CHANGED, idxPtr);
+
+                // --- 3. SỰ KIỆN GẠT CÔNG TẮC BẬT/TẮT MÁY LẠNH ---
                 lv_obj_add_event_cb(ui.acSwitch[i], [](lv_event_t *e)
                                     {
-            auto *switch_obj = static_cast<lv_obj_t *>(lv_event_get_target(e));
-            const auto idx = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
-            lv_obj_t *s_container = ui.acTempRow[idx];
-            if (!s_container) return;
+                    auto *switch_obj = static_cast<lv_obj_t *>(lv_event_get_target(e));
+                    const auto idx = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
+                    lv_obj_t *panel = ui.acControls[idx];
+                    if (!panel) return;
 
-            lv_obj_t *parent_box = lv_obj_get_parent(s_container);
-            const bool on = lv_obj_has_state(switch_obj, LV_STATE_CHECKED);
+                    lv_obj_t *parent_box = lv_obj_get_parent(panel);
+                    const bool on = lv_obj_has_state(switch_obj, LV_STATE_CHECKED);
 
-            // Gửi lệnh Bật/Tắt máy lạnh (idx: 0..2) sang appTask -> bắn ESP-NOW tới Slave
-            if (ui.cb.acToggle)
-            {
-                ui.cb.acToggle(idx, on);
-            }
+                    if (ui.cb.acToggle)
+                    {
+                        ui.cb.acToggle(idx, on);
+                    }
 
-            if (on)
-            {
-                lv_obj_remove_flag(s_container, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_set_height(parent_box, 100);
-            }
-            else
-            {
-                lv_obj_add_flag(s_container, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_set_height(parent_box, 54);
-            } }, LV_EVENT_VALUE_CHANGED, idxPtr);
+                    if (on)
+                    {
+                        lv_obj_remove_flag(panel, LV_OBJ_FLAG_HIDDEN);
+                        lv_obj_set_height(parent_box, 206);
+                    }
+                    else
+                    {
+                        lv_obj_add_flag(panel, LV_OBJ_FLAG_HIDDEN);
+                        lv_obj_set_height(parent_box, 54);
+                    } }, LV_EVENT_VALUE_CHANGED, idxPtr);
             }
         }
+
         void applyRelays(const Model &m)
         {
             for (int i = 0; i < RELAY_COUNT; i++)
@@ -888,32 +905,42 @@ namespace hmi
         {
             for (int i = 0; i < kAcCount; i++)
             {
-                if (!ui.acSwitch[i] || !ui.acTempRow[i] || !ui.acSlider[i] || !ui.acTempLabel[i])
+                if (!ui.acSwitch[i] || !ui.acControls[i] || !ui.acSlider[i] || !ui.acTempLabel[i])
                     continue;
 
                 const bool on = m.acOn[i];
                 setChecked(ui.acSwitch[i], on);
 
-                lv_obj_t *parent_box = lv_obj_get_parent(ui.acTempRow[i]);
+                lv_obj_t *parent_box = lv_obj_get_parent(ui.acControls[i]);
                 if (on)
                 {
-                    lv_obj_remove_flag(ui.acTempRow[i], LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_remove_flag(ui.acControls[i], LV_OBJ_FLAG_HIDDEN);
                     if (parent_box)
-                        lv_obj_set_height(parent_box, 100);
+                        lv_obj_set_height(parent_box, 206);
                 }
                 else
                 {
-                    lv_obj_add_flag(ui.acTempRow[i], LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_add_flag(ui.acControls[i], LV_OBJ_FLAG_HIDDEN);
                     if (parent_box)
                         lv_obj_set_height(parent_box, 54);
                 }
 
-                // Hỗ trợ cả trường hợp Model lưu độ nguyên (16..30) hoặc nhân đôi (32..60)
+                // Hỗ trợ cả trường hợp Model lưu độ nguyên (18..32) hoặc nhân đôi (36..64)
                 const int raw = m.acTemp[i];
-                const int val = constrain(raw <= 30 ? raw * 2 : raw, 32, 60);
+                const int deg = constrain(raw <= 32 ? raw : (raw / 2), 18, 32);
                 if (!lv_obj_has_state(ui.acSlider[i], LV_STATE_PRESSED))
-                    lv_slider_set_value(ui.acSlider[i], val, LV_ANIM_OFF);
-                lv_label_set_text_fmt(ui.acTempLabel[i], "%d.%d°C", val / 2, (val % 2) * 5);
+                    lv_slider_set_value(ui.acSlider[i], deg, LV_ANIM_OFF);
+                lv_label_set_text_fmt(ui.acTempLabel[i], "%d°C", deg);
+
+                if (ui.acFanSlider[i] && ui.acFanLabel[i] && !lv_obj_has_state(ui.acFanSlider[i], LV_STATE_PRESSED))
+                {
+                    lv_slider_set_value(ui.acFanSlider[i], s_acFan[i], LV_ANIM_OFF);
+                    lv_label_set_text(ui.acFanLabel[i], kAcFanNames[s_acFan[i]]);
+                }
+                if (ui.acSwingSwitch[i])
+                {
+                    setChecked(ui.acSwingSwitch[i], s_acSwing[i] != 0);
+                }
             }
         }
 
@@ -3459,13 +3486,6 @@ namespace hmi
     // Build (or rebuild after a palette change) every widget for the current palette.
     void buildAll()
     {
-        for (uint8_t i = 0; i < kAcCount; i++)
-        {
-            ui.acSwitch[i] = nullptr;
-            ui.acSlider[i] = nullptr;
-            ui.acTempLabel[i] = nullptr;
-            ui.acTempRow[i] = nullptr;
-        }
         const Callbacks cb = ui.cb;
         const uint8_t page = ui.current;
         const bool dimmed = ui.dimmed;
@@ -3927,6 +3947,16 @@ namespace hmi
         port::copyFramebuffer(copy);
         streamRle(out, copy, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_WIDTH * 2, true);
         heap_caps_free(copy);
+    }
+
+    void setAcFanSwing(uint8_t idx, uint8_t fan, uint8_t swing)
+    {
+        if (idx >= kAcCount)
+            return;
+        s_acFan[idx] = constrain(fan, 0, 6);
+        s_acSwing[idx] = swing ? 1 : 0;
+        ModelLock lock;
+        model().dirty |= D_AC;
     }
 
 } // namespace hmi
