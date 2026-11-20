@@ -18,6 +18,7 @@
 #include <Preferences.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <esp_task_wdt.h>
 #include <time.h>
 
@@ -162,16 +163,25 @@ namespace
     };
 
     void setRelay(int index, bool on)
+{
+    if (index < 0 || index >= RELAY_COUNT || g_relay[index] == on)
+        return;
+
+    g_relay[index] = on;
+    g_relayChange[index] = millis();
+    digitalWrite(kRelayPins[index], on ? HIGH : LOW);
+    hmi::setRelay(index, on);
+
+    if (index == 0)
     {
-        if (index < 0 || index >= RELAY_COUNT || g_relay[index] == on)
-            return;
-        g_relay[index] = on;
-        g_relayChange[index] = millis();
-        digitalWrite(kRelayPins[index], on ? HIGH : LOW);
-        hmi::setRelay(index, on);
-        storage::logEvent("Relay %d %s", index + 1, on ? "ON" : "OFF");
-        g_publishPending = true;
+        // Relay 1 BẬT -> gửi 2 (AB=10: Đèn Xanh sáng) | TẮT -> gửi 0 (AB=00: Tắt)
+        const uint8_t trafficState = on ? 2 : 0;
+        espnowSendTrafficCommand(trafficState);
     }
+
+    storage::logEvent("Relay %d %s", index + 1, on ? "ON" : "OFF");
+    g_publishPending = true;
+}
 
     void pushSensors(const SensorValues &s, hmi::SensorState state)
     {
@@ -675,16 +685,19 @@ namespace
         }
     }
 
-    void onEspNowSensor(uint8_t, float temp, float hum, float power)
-    {
-        AppMsg m{};
-        m.cmd = AppCmd::Sensors;
-        m.flag = isnan(temp);
-        m.v[0] = temp;
-        m.v[1] = hum;
-        m.v[2] = power;
-        postApp(m);
-    }
+    void onEspNowSensor(uint8_t nodeId, float temp, float hum, float power)
+{
+    if (nodeId != 1 && isnan(temp))
+        return;
+
+    AppMsg m{};
+    m.cmd = AppCmd::Sensors;
+    m.flag = isnan(temp);
+    m.v[0] = temp;
+    m.v[1] = hum;
+    m.v[2] = power;
+    postApp(m);
+}
 
     void netTask(void *)
     {
@@ -694,6 +707,8 @@ namespace
         g_mqtt.setBufferSize(2048);
         g_mqtt.setKeepAlive(MQTT_KEEPALIVE);
         g_mqtt.setSocketTimeout(2);
+        WiFi.setSleep(false);
+        esp_wifi_set_ps(WIFI_PS_NONE);
         wifimgr::begin(g_sdConfig);
         espnowInit(onEspNowSensor); // Khởi tạo esp_now
 

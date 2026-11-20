@@ -710,18 +710,18 @@ namespace hmi
         {
             makeScrollPage(page);
 
-            sectionTitle(page, "HỆ THỐNG CHIẾU SÁNG");
+            sectionTitle(page, "ĐÈN TÍN HIỆU");
             lv_obj_t *local = settingsCard(page);
 
             for (int i = 0; i < RELAY_COUNT; i++)
             {
-                lv_obj_t *r = switchRow(local, kRelayIcons[i], kRelayNames[i], i == 0,
+                lv_obj_t *r = switchRow(local, ICON_BULB, "Đèn xanh", i == 0,
                                         &ui.relayIcon[i], &ui.relayStatus[i], &ui.relaySwitch[i]);
 
                 lv_obj_set_style_bg_color(ui.relaySwitch[i], lv_color_hex(0x404040), LV_PART_MAIN);
                 lv_obj_set_style_bg_color(ui.relaySwitch[i], lv_color_hex(0xB0B0B0), LV_PART_KNOB);
 
-                lv_obj_set_style_bg_color(ui.relaySwitch[i], info(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+                lv_obj_set_style_bg_color(ui.relaySwitch[i], success(), LV_PART_INDICATOR | LV_STATE_CHECKED);
                 lv_obj_set_style_bg_color(ui.relaySwitch[i], lv_color_hex(0xFFFFFF), LV_PART_KNOB | LV_STATE_CHECKED);
 
                 if (i > 0)
@@ -894,10 +894,8 @@ namespace hmi
             {
                 const bool on = m.relay[i];
                 setChecked(ui.relaySwitch[i], on);
-                // Each device lights up in its own colour when on, grey when off.
-                const lv_color_t onColor[RELAY_COUNT] = {lamp(), info(), success()}; // per palette
-                lv_obj_set_style_text_color(ui.relayIcon[i], on ? onColor[i] : muted(), 0);
-                lv_label_set_text_fmt(ui.relayStatus[i], "%s · Kênh %d", on ? "Đang bật" : "Đã tắt", i + 1);
+                lv_obj_set_style_text_color(ui.relayIcon[i], on ? success() : muted(), 0);
+                lv_label_set_text(ui.relayStatus[i], on ? "Đang sáng" : "Đã tắt");
             }
         }
 
