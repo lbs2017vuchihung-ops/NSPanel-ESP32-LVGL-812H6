@@ -710,61 +710,77 @@ namespace hmi
         {
             makeScrollPage(page);
 
-            sectionTitle(page, "ĐÈN TÍN HIỆU");
-            lv_obj_t *local = settingsCard(page);
-
-            for (int i = 0; i < RELAY_COUNT; i++)
+            struct TrafficCardCfg
             {
-                lv_obj_t *r = switchRow(local, ICON_BULB, "Đèn xanh", i == 0,
-                                        &ui.relayIcon[i], &ui.relayStatus[i], &ui.relaySwitch[i]);
+                uint8_t relayIdx;
+                const char *section;
+                const char *name;
+                const char *icon;
+                lv_color_t activeColor;
+            };
 
-                lv_obj_set_style_bg_color(ui.relaySwitch[i], lv_color_hex(0x404040), LV_PART_MAIN);
-                lv_obj_set_style_bg_color(ui.relaySwitch[i], lv_color_hex(0xB0B0B0), LV_PART_KNOB);
+            // 3 khung riêng biệt từ trên xuống:
+            //   1. CB Tổng (index 1 - Đèn đỏ)
+            //   2. Đèn phòng (index 0 - Đèn xanh)
+            //   3. Đèn cảnh báo (index 2 - Đèn vàng)
+            const TrafficCardCfg kTrafficCards[RELAY_COUNT] = {
+                {1, "CB TỔNG",      "CB Tổng (Đỏ)",     ICON_PLUG_ZAP, error()},
+                {0, "ĐÈN PHÒNG",    "Đèn phòng (Xanh)", ICON_BULB,     success()},
+                {2, "ĐÈN CẢNH BÁO", "Cảnh báo AC (Vàng)",   ICON_ALERT,    warning()},
+            };
 
-                lv_obj_set_style_bg_color(ui.relaySwitch[i], success(), LV_PART_INDICATOR | LV_STATE_CHECKED);
-                lv_obj_set_style_bg_color(ui.relaySwitch[i], lv_color_hex(0xFFFFFF), LV_PART_KNOB | LV_STATE_CHECKED);
+            for (int pos = 0; pos < RELAY_COUNT; pos++)
+            {
+                const auto &cfg = kTrafficCards[pos];
+                const uint8_t idx = cfg.relayIdx;
 
-                if (i > 0)
-                {
-                    lv_obj_add_flag(r, LV_OBJ_FLAG_HIDDEN);
-                }
+                sectionTitle(page, cfg.section);
+                lv_obj_t *card = settingsCard(page);
+
+                lv_obj_t *r = switchRow(card, cfg.icon, cfg.name, true,
+                                        &ui.relayIcon[idx], &ui.relayStatus[idx], &ui.relaySwitch[idx]);
+
+                lv_obj_set_style_bg_color(ui.relaySwitch[idx], lv_color_hex(0x404040), LV_PART_MAIN);
+                lv_obj_set_style_bg_color(ui.relaySwitch[idx], lv_color_hex(0xB0B0B0), LV_PART_KNOB);
+
+                lv_obj_set_style_bg_color(ui.relaySwitch[idx], cfg.activeColor, LV_PART_INDICATOR | LV_STATE_CHECKED);
+                lv_obj_set_style_bg_color(ui.relaySwitch[idx], lv_color_hex(0xFFFFFF), LV_PART_KNOB | LV_STATE_CHECKED);
 
                 lv_obj_add_event_cb(r, [](lv_event_t *e)
                                     {
-                    const auto idx = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
-                    if (ui.cb.relayToggle) ui.cb.relayToggle(idx); }, LV_EVENT_CLICKED, reinterpret_cast<void *>(static_cast<uintptr_t>(i)));
+                    const auto relayIdx = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
+                    if (ui.cb.relayToggle) ui.cb.relayToggle(relayIdx); }, LV_EVENT_CLICKED, reinterpret_cast<void *>(static_cast<uintptr_t>(idx)));
             }
 
             // --- GIAO DIỆN 3 MÁY LẠNH (COOL: NHIỆT ĐỘ, FAN, SWING) ---
             sectionTitle(page, "ĐIỀU KHIỂN MÁY LẠNH");
-            lv_obj_t *acCard = settingsCard(page);
 
             for (int i = 0; i < kAcCount; i++)
             {
                 void *idxPtr = reinterpret_cast<void *>(static_cast<uintptr_t>(i));
 
-                lv_obj_t *r = box(acCard);
-                lv_obj_set_size(r, LV_PCT(100), 54);
-                lv_obj_set_style_pad_hor(r, 16, 0);
-
+                // Tạo từng khung card riêng cho mỗi máy lạnh để tách rời nhau
+                lv_obj_t *acCard = settingsCard(page);
                 if (i < kAcCount - 1)
                 {
-                    lv_obj_set_style_border_side(r, LV_BORDER_SIDE_BOTTOM, 0);
-                    lv_obj_set_style_border_width(r, 1, 0);
-                    lv_obj_set_style_border_color(r, elevated(), 0);
+                    lv_obj_set_style_margin_bottom(acCard, 4, 0);
                 }
 
+                lv_obj_t *r = box(acCard);
+                lv_obj_set_size(r, LV_PCT(100), 60);
+                lv_obj_set_style_pad_hor(r, 16, 0);
+
                 lv_obj_t *icon = label(r, &hmi_icons_20, info(), ICON_SNOWFLAKE);
-                lv_obj_set_pos(icon, 0, 16);
+                lv_obj_set_pos(icon, 0, 20);
 
                 char name[32];
                 snprintf(name, sizeof(name), "Máy lạnh %d", i + 1);
                 lv_obj_t *t = label(r, &hmi_font_14_m, text(), name);
-                lv_obj_set_pos(t, 32, 16);
+                lv_obj_set_pos(t, 32, 20);
 
                 // --- 1. CÔNG TẮC BẬT/TẮT ---
                 ui.acSwitch[i] = lv_switch_create(r);
-                lv_obj_align(ui.acSwitch[i], LV_ALIGN_TOP_RIGHT, 0, 12);
+                lv_obj_align(ui.acSwitch[i], LV_ALIGN_TOP_RIGHT, 0, 14);
                 lv_obj_set_style_bg_color(ui.acSwitch[i], lv_color_hex(0x404040), LV_PART_MAIN);
                 lv_obj_set_style_bg_color(ui.acSwitch[i], lv_color_hex(0xB0B0B0), LV_PART_KNOB);
                 lv_obj_set_style_bg_color(ui.acSwitch[i], info(), LV_PART_INDICATOR | LV_STATE_CHECKED);
@@ -773,7 +789,7 @@ namespace hmi
                 // --- 2. KHUNG CHỨA ĐIỀU CHỈNH (ẨN KHI TẮT) ---
                 ui.acControls[i] = box(r);
                 lv_obj_set_size(ui.acControls[i], LV_PCT(100), 152);
-                lv_obj_set_pos(ui.acControls[i], 0, 54);
+                lv_obj_set_pos(ui.acControls[i], 0, 60);
                 lv_obj_add_flag(ui.acControls[i], LV_OBJ_FLAG_HIDDEN);
 
                 // === MỤC 1: NHIỆT ĐỘ (18°C - 32°C, SỐ NGUYÊN) ===
@@ -798,13 +814,12 @@ namespace hmi
                     const int deg = static_cast<int>(lv_slider_get_value(slider));
                     lv_label_set_text_fmt(ui.acTempLabel[idx], "%d°C", deg);
 
-                    // Nhân 2 (36..64) để giữ tương thích chuẩn 0.5°C/đơn vị với appTask & ESP-NOW
                     if (ui.cb.acTemp)
                     {
                         ui.cb.acTemp(idx, static_cast<uint8_t>(deg * 2));
                     } }, LV_EVENT_VALUE_CHANGED, idxPtr);
 
-                // === MỤC 2: QUẠT / FAN (0=Auto, 1=Yên tĩnh, 2=Yếu, 3=Trung bình, 4=Cao, 5=Tối đa) ===
+                // === MỤC 2: QUẠT / FAN ===
                 lv_obj_t *lblFanTitle = label(ui.acControls[i], &hmi_font_13_r, muted(), "Quạt (FAN)");
                 lv_obj_set_pos(lblFanTitle, 0, 58);
 
@@ -835,7 +850,7 @@ namespace hmi
                         ui.cb.acFan(idx, val);
                     } }, LV_EVENT_ALL, idxPtr);
 
-                // === MỤC 3: ĐẢO GIÓ / SWING (NÚT BẬT / TẮT) ===
+                // === MỤC 3: ĐẢO GIÓ / SWING ===
                 lv_obj_t *lblSwingTitle = label(ui.acControls[i], &hmi_font_13_r, muted(), "Đảo gió (Swing)");
                 lv_obj_set_pos(lblSwingTitle, 0, 116);
 
@@ -878,12 +893,12 @@ namespace hmi
                     if (on)
                     {
                         lv_obj_remove_flag(panel, LV_OBJ_FLAG_HIDDEN);
-                        lv_obj_set_height(parent_box, 206);
+                        lv_obj_set_height(parent_box, 212);
                     }
                     else
                     {
                         lv_obj_add_flag(panel, LV_OBJ_FLAG_HIDDEN);
-                        lv_obj_set_height(parent_box, 54);
+                        lv_obj_set_height(parent_box, 60);
                     } }, LV_EVENT_VALUE_CHANGED, idxPtr);
             }
         }
@@ -894,8 +909,12 @@ namespace hmi
             {
                 const bool on = m.relay[i];
                 setChecked(ui.relaySwitch[i], on);
-                lv_obj_set_style_text_color(ui.relayIcon[i], on ? success() : muted(), 0);
-                lv_label_set_text(ui.relayStatus[i], on ? "Đang sáng" : "Đã tắt");
+
+                const lv_color_t onColor = (i == 1) ? error() : (i == 2) ? warning() : success();
+                lv_obj_set_style_text_color(ui.relayIcon[i], on ? onColor : muted(), 0);
+
+                const char *onText = (i == 1) ? "Đã ngắt toàn bộ" : (i == 2) ? "Quên tắt máy lạnh" : "Đang bật";
+                lv_label_set_text(ui.relayStatus[i], on ? onText : "Đã tắt");
             }
         }
 
@@ -914,13 +933,13 @@ namespace hmi
                 {
                     lv_obj_remove_flag(ui.acControls[i], LV_OBJ_FLAG_HIDDEN);
                     if (parent_box)
-                        lv_obj_set_height(parent_box, 206);
+                        lv_obj_set_height(parent_box, 212);
                 }
                 else
                 {
                     lv_obj_add_flag(ui.acControls[i], LV_OBJ_FLAG_HIDDEN);
                     if (parent_box)
-                        lv_obj_set_height(parent_box, 54);
+                        lv_obj_set_height(parent_box, 60);
                 }
 
                 // Hỗ trợ cả trường hợp Model lưu độ nguyên (18..32) hoặc nhân đôi (36..64)

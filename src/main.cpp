@@ -32,6 +32,7 @@
 #include "tasmota.h"
 #include "wifi_manager.h"
 #include "espnow_manager.h"
+#include "smart_room_ctrl.h"
 
 // Touch is read through LGFX (Touch_GT911 on I2C_NUM_1).  Do not also start
 // Wire on GPIO19/45 - two drivers on the same pins corrupt touch reads.
@@ -147,8 +148,8 @@ namespace
         hmi::setAc(index, on, static_cast<float>(temp), true);
         hmi::setAcFanSwing(index, finalFan, finalSwing);
 
-        // 2. Gửi gói tin ESP-NOW tới Slave trung tâm (Node #1) kèm đủ Temp, Fan, Swing
-        espnowSendAcCommand(index + 1, on, temp, finalFan, finalSwing);
+        // 2. Gọi logic phối hợp qua smart_room_ctrl
+        roomCtrlSetAc(index + 1, on, temp, finalFan, finalSwing);
 
         // 3. Ghi log & báo netTask đẩy telemetry lên CoreIoT
         storage::logEvent("AC %u %s (%uC F:%u S:%u)", index + 1, on ? "ON" : "OFF", temp, finalFan, finalSwing);
@@ -163,25 +164,39 @@ namespace
     };
 
     void setRelay(int index, bool on)
-{
-    if (index < 0 || index >= RELAY_COUNT || g_relay[index] == on)
-        return;
-
-    g_relay[index] = on;
-    g_relayChange[index] = millis();
-    digitalWrite(kRelayPins[index], on ? HIGH : LOW);
-    hmi::setRelay(index, on);
-
-    if (index == 0)
     {
-        // Relay 1 BẬT -> gửi 2 (AB=10: Đèn Xanh sáng) | TẮT -> gửi 0 (AB=00: Tắt)
-        const uint8_t trafficState = on ? 2 : 0;
-        espnowSendTrafficCommand(trafficState);
-    }
+        if (index < 0 || index >= RELAY_COUNT || g_relay[index] == on)
+            return;
 
-    storage::logEvent("Relay %d %s", index + 1, on ? "ON" : "OFF");
-    g_publishPending = true;
-}
+        bool stateChanged = false;
+        if (index == 0) // Đèn phòng (Xanh)
+        {
+            stateChanged = roomCtrlSetLight(on);
+            if (stateChanged)
+                g_relay[0] = roomCtrlIsLightOn();
+        }
+        else if (index == 1) // CB Tổng (Đỏ)
+        {
+            stateChanged = roomCtrlSetMasterBreaker(on);
+            if (stateChanged)
+                g_relay[1] = roomCtrlIsMasterBreakerOn();
+        }
+        else // Đèn cảnh báo (Vàng) - cho phép bật/tắt thủ công
+        {
+            stateChanged = roomCtrlSetYellowLight(on);
+            if (stateChanged)
+                g_relay[2] = roomCtrlIsYellowLightOn();
+        }
+
+        if (stateChanged)
+        {
+            g_relayChange[index] = millis();
+            digitalWrite(kRelayPins[index], g_relay[index] ? HIGH : LOW);
+            hmi::setRelay(index, g_relay[index]);
+            storage::logEvent("Relay %d %s", index + 1, g_relay[index] ? "ON" : "OFF");
+            g_publishPending = true;
+        }
+    }
 
     void pushSensors(const SensorValues &s, hmi::SensorState state)
     {
@@ -312,8 +327,8 @@ namespace
                             const bool isOn = g_acOn[m.index].load();
                             if (isOn)
                             {
-                                espnowSendAcCommand(m.index + 1, true, g_acTemp[m.index].load(),
-                                                    newFan, g_acSwing[m.index].load());
+                                roomCtrlSetAc(m.index + 1, true, g_acTemp[m.index].load(),
+                                              newFan, g_acSwing[m.index].load());
                             }
                             storage::logEvent("AC %u fan -> %u (%s)", m.index + 1, newFan, isOn ? "TX" : "SAVED");
                             g_publishPending = true;
@@ -337,8 +352,8 @@ namespace
                             const bool isOn = g_acOn[m.index].load();
                             if (isOn)
                             {
-                                espnowSendAcCommand(m.index + 1, true, g_acTemp[m.index].load(),
-                                                    g_acFan[m.index].load(), newSwing);
+                                roomCtrlSetAc(m.index + 1, true, g_acTemp[m.index].load(),
+                                              g_acFan[m.index].load(), newSwing);
                             }
                             storage::logEvent("AC %u swing -> %u (%s)", m.index + 1, newSwing, isOn ? "TX" : "SAVED");
                             g_publishPending = true;
@@ -379,7 +394,7 @@ namespace
 
                     // 2. Chỉ phát gói ESP-NOW sang Slave khi máy lạnh đang BẬT (kèm đúng Fan/Swing hiện tại)
                     if (isOn)
-                        espnowSendAcCommand(i + 1, true, finalTemp, curFan, curSwing);
+                        roomCtrlSetAc(i + 1, true, finalTemp, curFan, curSwing);
 
                     storage::logEvent("AC %u temp -> %uC (%s)", i + 1, finalTemp, isOn ? "TX" : "SAVED");
                     g_publishPending = true;
@@ -686,18 +701,18 @@ namespace
     }
 
     void onEspNowSensor(uint8_t nodeId, float temp, float hum, float power)
-{
-    if (nodeId != 1 && isnan(temp))
-        return;
+    {
+        if (nodeId != 1 && isnan(temp))
+            return;
 
-    AppMsg m{};
-    m.cmd = AppCmd::Sensors;
-    m.flag = isnan(temp);
-    m.v[0] = temp;
-    m.v[1] = hum;
-    m.v[2] = power;
-    postApp(m);
-}
+        AppMsg m{};
+        m.cmd = AppCmd::Sensors;
+        m.flag = isnan(temp);
+        m.v[0] = temp;
+        m.v[1] = hum;
+        m.v[2] = power;
+        postApp(m);
+    }
 
     void netTask(void *)
     {
@@ -987,8 +1002,35 @@ namespace
 
 } // namespace
 
+void onRoomUiSync(bool roomLightOn, bool masterBreakerOn, bool yellowLightOn, const AcUnitState ac[4])
+{
+    g_relay[0] = roomLightOn;
+    hmi::setRelay(0, roomLightOn);
+
+    g_relay[1] = masterBreakerOn;
+    hmi::setRelay(1, masterBreakerOn);
+
+    g_relay[2] = yellowLightOn;
+    hmi::setRelay(2, yellowLightOn);
+
+    for (uint8_t i = 1; i <= 3; ++i)
+    {
+        uint8_t idx = i - 1;
+        g_acOn[idx] = ac[i].power;
+        g_acTemp[idx] = ac[i].temp;
+        g_acFan[idx] = ac[i].fan;
+        g_acSwing[idx] = ac[i].swing;
+
+        hmi::setAc(idx, ac[i].power, static_cast<float>(ac[i].temp), true);
+        hmi::setAcFanSwing(idx, ac[i].fan, ac[i].swing);
+    }
+    g_publishPending = true;
+}
+
 void setup()
 {
+    roomCtrlInit(onRoomUiSync);
+
     Serial.begin(SERIAL_BAUDRATE);
     delay(100);
     Serial.println("\n\n=== ESP32-4848S040 Smart Home Panel ===");
@@ -1066,6 +1108,7 @@ void setup()
     xTaskCreatePinnedToCore(appTask, "app", 4 * 1024, nullptr, 4, nullptr, 1);
     xTaskCreatePinnedToCore(netTask, "net", 8 * 1024, nullptr, 2, nullptr, 0);
     xTaskCreatePinnedToCore(consoleTask, "console", 4 * 1024, nullptr, 1, nullptr, 0);
+
     Serial.println("Tasks started: ui app net devices storage console");
 }
 

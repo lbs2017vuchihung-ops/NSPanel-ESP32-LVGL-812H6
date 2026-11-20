@@ -1,4 +1,5 @@
 #include "espnow_manager.h"
+#include "smart_room_ctrl.h"
 
 #include <WiFi.h>
 #include <esp_now.h>
@@ -86,6 +87,17 @@ static void onDataRecv(const uint8_t *mac, const uint8_t *data, int len)
         {
             s_sensorCb(pkt.node_id, pkt.temperature, pkt.humidity, pkt.power_w);
         }
+
+        // Tạo gói phản hồi PING_ACK gửi ngược lại cho Slave
+        EspNowPacket ack = {};
+        ack.msg_type = MSG_PING_ACK;
+        ack.node_id = pkt.node_id;
+        ack.traffic_state = roomCtrlIsMasterBreakerOn() ? 3
+                          : roomCtrlIsLightOn()         ? 2
+                          : roomCtrlIsYellowLightOn()   ? 1
+                          : 0;
+
+        esp_now_send(mac, reinterpret_cast<const uint8_t *>(&ack), sizeof(ack));
     }
 }
 
