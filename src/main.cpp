@@ -485,6 +485,17 @@ namespace
                 postApp(m);
                 Serial.printf("Received setLight: %d\n", state);
             }
+
+            else if (strcmp(method, "setMasterBreaker") == 0)
+            {
+                postApp(AppMsg{AppCmd::RelaySet, 1, state, {}, {}});
+            }
+
+            else if (strcmp(method, "setAcWarning") == 0)
+            {
+                postApp(AppMsg{AppCmd::RelaySet, 2, state, {}, {}});
+            }
+
             else if (strncmp(method, "setAC", 5) == 0 && method[5] >= '1' && method[5] <= '3')
             {
                 const uint8_t idx = static_cast<uint8_t>(method[5] - '1'); // '1'..'3' -> 0..2
@@ -584,6 +595,14 @@ namespace
             doc[kFan] = g_acFan[i].load();
             doc[kSwg] = g_acSwing[i].load() != 0;
         }
+        doc["ac1"] = g_acOn[0].load();
+        doc["ac2"] = g_acOn[1].load();
+        doc["ac3"] = g_acOn[2].load();
+
+        doc["room_light"] = g_relay[0].load();
+        doc["master_breaker"] = g_relay[1].load();
+        doc["ac_warning"] = g_relay[2].load();
+
 
         String out;
         serializeJson(doc, out);
