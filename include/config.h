@@ -4,9 +4,9 @@
 #define CONFIG_H
 
 // ===== WiFi Configuration =====
-#define WIFI_SSID "LGBao#1"
+#define WIFI_SSID ""
 // Open Wi-Fi network: keep the password empty.
-#define WIFI_PASSWORD "baocontrebaomuondichoi" //wifi của Bảo để test 
+#define WIFI_PASSWORD "" //wifi của Bảo để test 
 #define WIFI_HOSTNAME "esp32-4848s040"
 #define WIFI_RECONNECT_INTERVAL 10000
 

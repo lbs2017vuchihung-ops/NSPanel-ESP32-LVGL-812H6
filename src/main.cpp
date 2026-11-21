@@ -191,7 +191,7 @@ namespace
         if (stateChanged)
         {
             g_relayChange[index] = millis();
-            digitalWrite(kRelayPins[index], g_relay[index] ? HIGH : LOW);
+            //digitalWrite(kRelayPins[index], g_relay[index] ? HIGH : LOW);
             hmi::setRelay(index, g_relay[index]);
             storage::logEvent("Relay %d %s", index + 1, g_relay[index] ? "ON" : "OFF");
             g_publishPending = true;
@@ -1032,7 +1032,7 @@ void setup()
     roomCtrlInit(onRoomUiSync);
 
     Serial.begin(SERIAL_BAUDRATE);
-    delay(100);
+    vTaskDelay(pdMS_TO_TICKS(100));
     Serial.println("\n\n=== ESP32-4848S040 Smart Home Panel ===");
     Serial.printf("Firmware: %s  Hardware: %s\n", FIRMWARE_VERSION, HARDWARE_VERSION);
     Serial.printf("Reset reason: %d\n", (int)esp_reset_reason());
